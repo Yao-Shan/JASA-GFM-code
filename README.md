@@ -11,7 +11,7 @@ a separate simulation notebook used as the algorithm reference.
 Run the following from the repository root:
 
 ```r
-source("practitioner/gfm_estimation.R")
+source("R/gfm_estimation.R")
 
 # Your observed square network matrix, without a header or row labels.
 A <- gfm_read_matrix("network.csv")
@@ -37,17 +37,27 @@ The independent estimation source requires only base R. It does not generate
 data, set a random seed, start Monte Carlo repetitions, or write output files.
 Optimization iterations are updates for the single supplied dataset.
 
-Read the [practitioner guide](practitioner/README.txt) for named-node CSVs,
+Read the [practitioner guide](docs/user_guide.md) for named-node CSVs,
 controls, returned values, failures, prediction, and saving results.
 
-## Files
+## Repository structure
 
-| Path | Purpose |
-| --- | --- |
-| [`practitioner/gfm_estimation.R`](practitioner/gfm_estimation.R) | Standalone estimation, Lambda bias correction, and fitted predictions. |
-| [`practitioner/README.txt`](practitioner/README.txt) | English usage guide and interpretation of the estimates. |
-| [`practitioner/tests/test_gfm.R`](practitioner/tests/test_gfm.R) | Input, numerical, and original-algorithm regression checks. |
-| [`code/node_inference.Rmd`](code/node_inference.Rmd) | Simulation reference with data generation, repeated network fitting, and theorem diagnostics. |
+```text
+JASA-GFM-code/
+├── R/
+│   └── gfm_estimation.R       # Functions for one observed network
+├── docs/
+│   └── user_guide.md          # Inputs, controls, results, and interpretation
+├── simulations/
+│   └── node_inference.Rmd     # Data generation and Monte Carlo analysis
+├── tests/
+│   └── test_gfm.R             # Deterministic regression checks
+└── README.md
+```
+
+For an existing dataset, start with [`R/gfm_estimation.R`](R/gfm_estimation.R)
+and the [user guide](docs/user_guide.md). To run the simulation study, use
+[`simulations/node_inference.Rmd`](simulations/node_inference.Rmd).
 
 ## Input and interpretation
 
@@ -69,7 +79,7 @@ The usage guide describes the memory guard and computational limits.
 ## Verification
 
 ```sh
-Rscript --vanilla practitioner/tests/test_gfm.R
+Rscript --vanilla tests/test_gfm.R
 ```
 
 The current suite has 80 checks covering all four likelihoods, agreement with
@@ -80,12 +90,13 @@ function definitions from the notebook without running its simulation pipeline.
 
 ## Simulation reference
 
-Open `code/node_inference.Rmd` in RStudio to reproduce or adapt the simulation
+Open `simulations/node_inference.Rmd` in RStudio to reproduce or adapt the simulation
 workflow. It uses `rmarkdown`, `knitr`, `doParallel`, and `foreach`, which are
 not required by the practitioner interface or the test suite.
 
 Review the YAML parameters before knitting: `run_simulation: true` starts the
 configured experiment; the current notebook specifies 1,000 replications and
 up to seven workers. Set `run_simulation: false` for its truth-checking mode.
-Simulation results and analysis datasets are generated or supplied separately;
-they are not bundled in this code repository.
+The notebook writes its configured results under `data/` at the repository
+root. Simulation results and analysis datasets are generated or supplied
+separately; they are not bundled in this code repository.
