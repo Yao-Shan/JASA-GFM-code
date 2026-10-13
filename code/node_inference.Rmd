@@ -1,0 +1,2618 @@
+---
+title: "GFM Symmetric 9 - Advisor Ball-Rejection Sampling with Uncentered Whitened U"
+author: "lsy"
+date: "`r Sys.Date()`"
+output: html_document
+params:
+  model: "poisson"
+  run_simulation: true
+  n: 500
+  n_sim: 1000
+  k: 2
+  lambda_values: "0.5,0.5"
+  design_seed: null
+  replication_seed_base: null
+  target_node: 1
+  sigma: null
+  learning_rate: null
+  max_iter: null
+  tolerance: null
+  M_bound_U: null
+  M_bound_Lambda: null
+  probability_eps: null
+  probability_floor: null
+  curvature_floor: null
+  node_information_floor: null
+  whitening_eigen_floor: null
+  truth_check_action: "warning"
+  n_cores: 7
+  output_dir: "../data/node1/n500_equal/poisson"
+---
+
+
+本文件采用导师分享的 [DLSM/simulation.R](https://github.com/yatian20/DLSM/blob/main/simulation.R)
+中的球内拒绝采样方法：先在 $[-1,1]^k$ 内独立均匀抽样，再保留
+$\|z_i\|<1$ 的点。若一批合格点不足 $n$ 个，会继续抽样直到补足。
+初始批量沿用 $n2^k$，单批最多 50,000 行；后续批次使用相同批量。
+高维时拒绝采样接受率会下降，本文件当前使用 $k=2$。
+
+按当前模型要求，保留**不中心化**和未中心化二阶矩白化：
+$U=Z(Z^\top Z/n)^{-1/2}$，从而 $U^\top U/n=I_k$。
+原始 $Z$ 的球半径为 1；白化后的 $U$ 不再受单位球半径约束。
+导师代码中的样本中心化、整体缩放、节点效应 $\alpha_{it}$ 和时间维度 $T$
+未引入本模型；交互项仍为 $\theta_{ij}=u_i^\top\Lambda u_j$，响应分布仍由
+`model` 选择。所有重复模拟使用同一组潜变量真值，仅重新抽样网络观测。
+
+与原 Rmd 的“随机方向 + 随机半径”方法相比，这里的最终 $U$ 具有相同的
+理论分布，但相同种子产生的具体样本不同。当前结果保存到
+`../data/node1/n500_equal/poisson`。顶部参数目前为 Poisson、$n=500$、
+$k=2$、1000 次重复和 $\Lambda=\operatorname{diag}(0.5,0.5)$。
+仅检查真值而不运行完整模拟时，可将 `run_simulation` 改为 `false`。
+
+在 RStudio 中打开本文件并 Knit 时，相对路径以本文件所在的 `code/`
+文件夹为起点。更换样本量、Lambda 场景或模型时，请同时修改 `output_dir`。
+单个模型使用模型子目录，例如 `../data/node1/n500_equal/poisson`；
+`model: "all"` 时使用上一级目录，例如 `../data/node1/n500_equal`，
+程序会自动添加 `gaussian`、`poisson`、`logit`、`probit` 子目录。
+并行工作进程最多使用 7 个。
+
+This notebook supports `gaussian`, `poisson`, `bernoulli_logit`, and
+`bernoulli_probit`; set `model: "all"` to run them sequentially. 
+`truth_check_action` may be set to `"error"`, `"warning"`, or `"none"`.
+
+The latent dimension is dynamic. If `k` is `null`, it is inferred from the
+length of `lambda_values`; if `k` is supplied, it must equal that length. For
+example, `k: 3` with `lambda_values: "0.30, 0.25, 0.20"` automatically changes
+all truth, optimization, Theorem 1, Theorem 2, result, and QQ-plot dimensions.
+Keep `lambda_values` quoted in the YAML header; the code parses the
+comma-separated values and avoids YAML's mixed integer/double list ambiguity.
+
+To run the simulations, set `run_simulation: true` and choose `model` from
+`"gaussian"`, `"poisson"`, `"bernoulli_logit"`, `"bernoulli_probit"`, or
+`"all"`. Parameters left as `null` use the model-specific defaults below;
+for example, set `n: 1000`, `n_sim: 400`, and `n_cores: 7` for a larger run.
+Each model writes results, the complete object, truth, configuration, settings,
+and QQ plots to its own output folder.
+
+```{r, message=FALSE, warning=FALSE}
+# ================================================================
+# Unified GFM Symmetric 9 simulation with dynamic user-specified K and
+# one common truth design.
+#
+# Supported models:
+#   "bernoulli_logit", "bernoulli_probit", "gaussian", "poisson"
+#   Use model="all" to run all four models sequentially.
+#
+# Truth design used by every model:
+#   Draw candidate coordinates iid Uniform(-1,1).
+#   Keep rows with squared norm < 1, repeating batches until n are kept.
+#   z_i are iid uniform in the unit K-ball (advisor's rejection method).
+#   S_Z = Z^T Z / n
+#   U_star = Z S_Z^{-1/2}
+# Therefore U_star^T U_star=n I_k, up to roundoff. No sample-centering
+# constraint is imposed, so 1^T U_star is generally nonzero.
+# U_star is generated once outside the Monte Carlo loop and is fixed
+# throughout all replications.
+# ================================================================
+
+library(doParallel)
+library(foreach)
+
+# Allow the extracted R code to be sourced outside rmarkdown::render().
+# knitr::purl() writes only non-NULL YAML parameters, so also fill any names
+# absent from an already-created params list.
+default_runtime_params <- list(
+  model = "all",
+  run_simulation = FALSE,
+  n = NULL,
+  n_sim = NULL,
+  k = NULL,
+  lambda_values = "0.40, 0.35",
+  design_seed = NULL,
+  replication_seed_base = NULL,
+  target_node = NULL,
+  sigma = NULL,
+  learning_rate = NULL,
+  max_iter = NULL,
+  tolerance = NULL,
+  M_bound_U = NULL,
+  M_bound_Lambda = NULL,
+  probability_eps = NULL,
+  probability_floor = NULL,
+  curvature_floor = NULL,
+  node_information_floor = NULL,
+  whitening_eigen_floor = NULL,
+  truth_check_action = "error",
+  n_cores = NULL,
+  output_dir = NULL
+)
+runtime_params <- default_runtime_params
+if (exists("params", inherits = FALSE)) {
+  supplied_param_names <- intersect(names(default_runtime_params), names(params))
+  runtime_params[supplied_param_names] <- params[supplied_param_names]
+}
+
+# Pin every random-number algorithm. Each replication resets its own seed, so
+# results do not depend on the number or scheduling of parallel workers.
+set_reproducible_seed <- function(seed) {
+  RNGkind(
+    kind = "Mersenne-Twister",
+    normal.kind = "Inversion",
+    sample.kind = "Rejection"
+  )
+  set.seed(as.integer(seed))
+}
+
+RNGkind(
+  kind = "Mersenne-Twister",
+  normal.kind = "Inversion",
+  sample.kind = "Rejection"
+)
+
+# -------------------------- Configuration ------------------------
+
+# Resolve supported aliases to a single model name used by all routines.
+normalize_model_name <- function(model) {
+  key <- tolower(gsub("[- ]", "_", model))
+  aliases <- c(
+    logit = "bernoulli_logit",
+    bernoulli_logit = "bernoulli_logit",
+    probit = "bernoulli_probit",
+    bernoulli_probit = "bernoulli_probit",
+    gaussian = "gaussian",
+    normal = "gaussian",
+    poisson = "poisson"
+  )
+  if (!key %in% names(aliases)) {
+    stop(
+      "Unknown model: ", model,
+      ". Choose bernoulli_logit, bernoulli_probit, gaussian, or poisson."
+    )
+  }
+  unname(aliases[[key]])
+}
+
+# Parse the requested diagonal of Lambda_star from numeric or YAML input.
+parse_lambda_values <- function(value) {
+  if (is.null(value)) return(NULL)
+
+  # Accept an R numeric vector/list, YAML [a, b, ...], or a comma-separated
+  # character value supplied programmatically.
+  if (is.character(value)) {
+    pieces <- unlist(strsplit(
+      gsub("\\[|\\]", "", paste(value, collapse = ",")),
+      split = ",",
+      fixed = TRUE
+    ), use.names = FALSE)
+    pieces <- trimws(pieces)
+    pieces <- pieces[nzchar(pieces)]
+    lambda_vec <- suppressWarnings(as.numeric(pieces))
+  } else {
+    if (is.logical(value) ||
+        (is.list(value) && any(vapply(value, is.null, logical(1L))))) {
+      stop("lambda_values cannot contain logical or NULL entries.")
+    }
+    flattened <- unlist(value, recursive = TRUE, use.names = FALSE)
+    if (!is.numeric(flattened) || is.logical(flattened)) {
+      stop("lambda_values entries must all be numeric.")
+    }
+    lambda_vec <- as.numeric(flattened)
+  }
+
+  if (!length(lambda_vec) || any(!is.finite(lambda_vec))) {
+    stop("lambda_values must contain at least one finite numeric value.")
+  }
+  unname(lambda_vec)
+}
+
+# Resolve K and the true diagonal coefficients, requiring matching lengths.
+resolve_latent_parameters <- function(base_config, k_value, lambda_values) {
+  lambda_vec <- parse_lambda_values(lambda_values)
+
+  if (is.null(k_value)) {
+    k <- if (is.null(lambda_vec)) base_config$k else length(lambda_vec)
+  } else {
+    k_numeric <- suppressWarnings(as.numeric(k_value))
+    if (length(k_numeric) != 1L || !is.finite(k_numeric) ||
+        k_numeric < 1 || k_numeric != floor(k_numeric) ||
+        k_numeric > .Machine$integer.max) {
+      stop("k must be one positive integer or NULL.")
+    }
+    k <- as.integer(k_numeric)
+  }
+
+  if (is.null(lambda_vec)) {
+    if (k != base_config$k) {
+      stop(
+        "When k differs from its model default, provide lambda_values ",
+        "with exactly k entries."
+      )
+    }
+    lambda_vec <- base_config$lambda_vec
+  }
+  if (length(lambda_vec) != k) {
+    stop(sprintf(
+      "k=%d but lambda_values contains %d entries.",
+      k, length(lambda_vec)
+    ))
+  }
+
+  list(k = as.integer(k), lambda_vec = lambda_vec)
+}
+
+# Supply model-specific simulation and optimization defaults before overrides.
+default_model_configs <- function() {
+  # YAML parameters override these values before validation; target_node must
+  # lie in 1,...,n. For final runs, set n and n_sim explicitly (for example
+  # n=1000, n_sim=1000) and choose worker counts within the memory budget.
+  list(
+    bernoulli_logit = list(
+      model = "bernoulli_logit",
+      n = 300L, k = 2L, n_sim = 100L,
+      lambda_vec = c(0.40, 0.35), sigma = 1,
+      target_node = 813L,
+      design_seed = 238687L, replication_seed_base = 2000L,
+      max_iter = 40000L, learning_rate = 1, tolerance = 1e-1,
+      M_bound_U = 20, M_bound_Lambda = 20,
+      probability_eps = 1e-3,
+      probability_floor = 0.02, curvature_floor = 0.02,
+      node_information_floor = 1e-4,
+      truth_check_action = "error",
+      truth_design = "uniform_ball_rejection_whitened_no_centering",
+      whitening_eigen_floor = 1e-10,
+      output_prefix = "bernoulli_logit_no_alpha"
+    ),
+    bernoulli_probit = list(
+      model = "bernoulli_probit",
+      n = 300L, k = 2L, n_sim = 100L,
+      lambda_vec = c(0.40, 0.35), sigma = 1,
+      target_node = 813L,
+      design_seed = 238687L, replication_seed_base = 2000L,
+      max_iter = 40000L, learning_rate = 1, tolerance = 1e-3,
+      M_bound_U = 20, M_bound_Lambda = 20,
+      probability_eps = 1e-3,
+      probability_floor = 0.02, curvature_floor = 0.02,
+      node_information_floor = 1e-4,
+      truth_check_action = "error",
+      truth_design = "uniform_ball_rejection_whitened_no_centering",
+      whitening_eigen_floor = 1e-10,
+      output_prefix = "bernoulli_probit_no_alpha"
+    ),
+    gaussian = list(
+      model = "gaussian",
+      n = 300L, k = 2L, n_sim = 100L,
+      lambda_vec = c(0.40, 0.35), sigma = 1,
+      target_node = 813L,
+      design_seed = 238687L, replication_seed_base = 2000L,
+      max_iter = 10000L, learning_rate = 0.1, tolerance = 1e-1,
+      M_bound_U = 20, M_bound_Lambda = 20,
+      probability_eps = 1e-3,
+      probability_floor = NA_real_, curvature_floor = 0.02,
+      node_information_floor = 1e-4,
+      truth_check_action = "error",
+      truth_design = "uniform_ball_rejection_whitened_no_centering",
+      whitening_eigen_floor = 1e-10,
+      output_prefix = "gaussian_no_alpha"
+    ),
+    poisson = list(
+      model = "poisson",
+      n = 300L, k = 2L, n_sim = 100L,
+      lambda_vec = c(0.40, 0.35), sigma = 1,
+      target_node = 813L,
+      design_seed = 238687L, replication_seed_base = 2000L,
+      max_iter = 60000L, learning_rate = 2e-2, tolerance = 1e-4,
+      M_bound_U = 20, M_bound_Lambda = 20,
+      probability_eps = 1e-3,
+      probability_floor = NA_real_, curvature_floor = 0.02,
+      node_information_floor = 1e-4,
+      truth_check_action = "error",
+      truth_design = "uniform_ball_rejection_whitened_no_centering",
+      whitening_eigen_floor = 1e-10,
+      output_prefix = "poisson_no_alpha"
+    )
+  )
+}
+
+# Apply named overrides, validate the configuration, and cast integer fields.
+get_model_config <- function(model, overrides = list()) {
+  model <- normalize_model_name(model)
+  config <- default_model_configs()[[model]]
+  if (length(overrides)) {
+    unknown <- setdiff(names(overrides), names(config))
+    if (length(unknown)) {
+      stop("Unknown configuration field(s): ", paste(unknown, collapse = ", "))
+    }
+    config[names(overrides)] <- overrides
+  }
+  validate_model_config(config)
+  integer_fields <- c(
+    "n", "k", "n_sim", "max_iter", "target_node",
+    "design_seed", "replication_seed_base"
+  )
+  config[integer_fields] <- lapply(config[integer_fields], as.integer)
+  config
+}
+
+# Reject incompatible dimensions, seeds, bounds, and simulation controls.
+validate_model_config <- function(config) {
+  integer_fields <- c(
+    "n", "k", "n_sim", "max_iter", "target_node",
+    "design_seed", "replication_seed_base"
+  )
+  valid_integer_scalar <- function(x) {
+    length(x) == 1L && is.finite(x) && x == floor(x) &&
+      abs(x) <= .Machine$integer.max
+  }
+  invalid_integer_fields <- integer_fields[!vapply(
+    config[integer_fields], valid_integer_scalar, logical(1L)
+  )]
+  if (length(invalid_integer_fields)) {
+    stop(
+      "These fields must be finite integer scalars: ",
+      paste(invalid_integer_fields, collapse = ", ")
+    )
+  }
+  if (config$n <= config$k || config$k < 1L) stop("Require n > k >= 1.")
+  if (length(config$lambda_vec) != config$k ||
+      any(!is.finite(config$lambda_vec))) {
+    stop("lambda_vec must contain k finite values.")
+  }
+  lambda_scale <- max(abs(config$lambda_vec), 1)
+  if (min(abs(config$lambda_vec)) <=
+      sqrt(.Machine$double.eps) * lambda_scale) {
+    stop(
+      "Every lambda value must be nonzero at numerical precision so that ",
+      "the k latent directions are identifiable."
+    )
+  }
+  if (config$n_sim < 1L || config$max_iter < 1L) {
+    stop("n_sim and max_iter must be positive.")
+  }
+  if (!is.finite(config$learning_rate) ||
+      !is.finite(config$tolerance) ||
+      config$learning_rate <= 0 || config$tolerance <= 0) {
+    stop("learning_rate and tolerance must be positive.")
+  }
+  if (!is.finite(config$M_bound_U) ||
+      config$M_bound_U < sqrt(config$k)) {
+    stop("M_bound_U must be finite and at least sqrt(k).")
+  }
+  if (!is.finite(config$M_bound_Lambda) ||
+      config$M_bound_Lambda < max(abs(config$lambda_vec))) {
+    stop(
+      "M_bound_Lambda must be finite and at least max(abs(lambda_vec))."
+    )
+  }
+  if (!is.finite(config$probability_eps) ||
+      config$probability_eps <= 0 || config$probability_eps >= 0.5) {
+    stop("probability_eps must lie strictly between 0 and 0.5.")
+  }
+  maximum_seed <- .Machine$integer.max
+  if (config$design_seed < 0 || config$design_seed > maximum_seed ||
+      config$replication_seed_base < 0 ||
+      config$replication_seed_base > maximum_seed - config$n_sim) {
+    stop(
+      "Seeds must be nonnegative integers, and replication_seed_base + ",
+      "n_sim must not exceed .Machine$integer.max."
+    )
+  }
+  if (config$target_node < 1L || config$target_node > config$n) {
+    stop("target_node must lie in 1,...,n.")
+  }
+  if (length(config$sigma) != 1L || !is.finite(config$sigma)) {
+    stop("sigma must be a finite scalar.")
+  }
+  if (config$model == "gaussian" && config$sigma <= 0) {
+    stop("Gaussian sigma must be positive.")
+  }
+  if (!config$truth_check_action %in% c("warning", "error", "none")) {
+    stop("truth_check_action must be warning, error, or none.")
+  }
+  if (!is.finite(config$whitening_eigen_floor) ||
+      config$whitening_eigen_floor <= 0) {
+    stop("whitening_eigen_floor must be positive.")
+  }
+  if (!is.na(config$probability_floor) &&
+      (!is.finite(config$probability_floor) ||
+       config$probability_floor <= 0 || config$probability_floor >= 0.5)) {
+    stop("probability_floor must be NA or lie strictly between 0 and 0.5.")
+  }
+  if (!is.na(config$curvature_floor) &&
+      (!is.finite(config$curvature_floor) || config$curvature_floor <= 0)) {
+    stop("curvature_floor must be NA or positive.")
+  }
+  if (!is.na(config$node_information_floor) &&
+      (!is.finite(config$node_information_floor) ||
+       config$node_information_floor <= 0)) {
+    stop("node_information_floor must be NA or positive.")
+  }
+  invisible(TRUE)
+}
+
+# --------------------------- Utilities ---------------------------
+
+# Remove numerical asymmetry by averaging a matrix with its transpose.
+symmetrize <- function(A) (A + t(A)) / 2
+
+# Evaluate logistic probabilities without overflowing for large |x|.
+sigmoid <- function(x) {
+  out <- numeric(length(x))
+  positive <- x >= 0
+  out[positive] <- 1 / (1 + exp(-x[positive]))
+  exp_x <- exp(x[!positive])
+  out[!positive] <- exp_x / (1 + exp_x)
+  dim(out) <- dim(x)
+  out
+}
+
+# Evaluate log(1 + exp(x)) stably for the logit likelihood.
+stable_log1pexp <- function(x) {
+  pmax(x, 0) + log1p(exp(-abs(x)))
+}
+
+# Invert retained positive eigenvalues, dropping specified nuisance directions.
+# Reject substantial negative eigenvalues instead of concealing indefiniteness.
+safe_pinv_psd <- function(
+  A, n_drop = 0L, rel_tol = 1e-10, negative_tol = 1e-7
+) {
+  A <- symmetrize(A)
+  eg <- eigen(A, symmetric = TRUE)
+  vals <- eg$values
+  p <- length(vals)
+  if (any(!is.finite(vals))) stop("Non-finite information eigenvalue.")
+  if (n_drop < 0L || n_drop > p) stop("Invalid n_drop.")
+  if (p == 0L || n_drop == p) return(matrix(0, p, p))
+
+  scale <- max(abs(vals))
+  if (scale == 0) return(matrix(0, p, p))
+  if (min(vals) < -negative_tol * scale) {
+    stop(sprintf(
+      "Matrix expected to be PSD has min eigenvalue %.4e (scale %.4e).",
+      min(vals), scale
+    ))
+  }
+
+  keep <- rep(TRUE, p)
+  if (n_drop > 0L) {
+    keep[order(abs(vals))[seq_len(n_drop)]] <- FALSE
+  }
+  keep <- keep & vals > rel_tol * scale
+  vals_inv <- numeric(p)
+  vals_inv[keep] <- 1 / vals[keep]
+  symmetrize(eg$vectors %*% diag(vals_inv, p) %*% t(eg$vectors))
+}
+
+# Compute the symmetric PSD square root used to standardize estimation errors.
+safe_sqrt_psd <- function(A, rel_tol = 1e-10, negative_tol = 1e-7) {
+  A <- symmetrize(A)
+  eg <- eigen(A, symmetric = TRUE)
+  vals <- eg$values
+  if (any(!is.finite(vals))) stop("Non-finite covariance eigenvalue.")
+  scale <- max(abs(vals))
+  if (scale == 0) return(matrix(0, nrow(A), ncol(A)))
+  if (min(vals) < -negative_tol * scale) {
+    stop(sprintf(
+      "Matrix expected to be PSD has min eigenvalue %.4e (scale %.4e).",
+      min(vals), scale
+    ))
+  }
+  vals[vals < rel_tol * scale] <- 0
+  symmetrize(eg$vectors %*% diag(sqrt(vals), length(vals)) %*% t(eg$vectors))
+}
+
+# Require numerical positive definiteness and return the checked eigenvalues.
+assert_positive_definite <- function(
+  A, label = "Information matrix", rel_tol = 1e-10
+) {
+  values <- eigen(
+    symmetrize(A), symmetric = TRUE, only.values = TRUE
+  )$values
+  if (!length(values) || any(!is.finite(values))) {
+    stop(label, " has non-finite or missing eigenvalues.")
+  }
+  scale <- max(abs(values))
+  if (scale == 0 || min(values) <= rel_tol * scale) {
+    stop(sprintf(
+      "%s is not numerically positive definite: min %.4e, max scale %.4e.",
+      label, min(values), scale
+    ))
+  }
+  invisible(values)
+}
+
+# Invert a positive-definite matrix by Cholesky and report conditioning checks.
+ordinary_inverse_pd <- function(
+  A, label = "Information matrix", rel_tol = 1e-10
+) {
+  A <- symmetrize(A)
+  values <- assert_positive_definite(A, label, rel_tol)
+  inverse <- symmetrize(chol2inv(chol(A)))
+  inverse_residual <- max(abs(A %*% inverse - diag(nrow(A))))
+  list(
+    inverse = inverse,
+    eigenvalues = values,
+    min_eigenvalue = min(values),
+    max_eigenvalue = max(values),
+    condition_number = max(values) / min(values),
+    inverse_residual = inverse_residual
+  )
+}
+
+# Compute an inverse square root for whitening; reject ill-conditioned inputs.
+symmetric_inverse_sqrt <- function(A, eigen_floor = 1e-10) {
+  A <- symmetrize(A)
+  eg <- eigen(A, symmetric = TRUE)
+  vals <- eg$values
+  if (any(!is.finite(vals)) || max(vals) <= 0) {
+    stop("The uncentered sample second-moment matrix is not positive definite.")
+  }
+  threshold <- eigen_floor * max(vals)
+  if (min(vals) <= threshold) {
+    stop(sprintf(
+      paste0(
+        "The uncentered sample second-moment matrix is too ill-conditioned: ",
+        "min eigenvalue %.4e, threshold %.4e."
+      ),
+      min(vals), threshold
+    ))
+  }
+  symmetrize(
+    eg$vectors %*% diag(1 / sqrt(vals), length(vals)) %*% t(eg$vectors)
+  )
+}
+
+# Vectorize symmetric Lambda: diagonal / sqrt(2), then upper entries by row.
+get_lambda_v <- function(Lambda) {
+  k <- nrow(Lambda)
+  out <- diag(Lambda) / sqrt(2)
+  if (k >= 2L) {
+    for (a in seq_len(k - 1L)) {
+      for (b in seq.int(a + 1L, k)) out <- c(out, Lambda[a, b])
+    }
+  }
+  as.vector(out)
+}
+
+# Differentiate u_i^T Lambda u_j in the get_lambda_v() coordinate order.
+lambda_direction_derivative <- function(ui, uj) {
+  k <- length(ui)
+  out <- sqrt(2) * ui * uj
+  if (k >= 2L) {
+    for (a in seq_len(k - 1L)) {
+      for (b in seq.int(a + 1L, k)) {
+        out <- c(out, ui[a] * uj[b] + ui[b] * uj[a])
+      }
+    }
+  }
+  as.vector(out)
+}
+
+# Return a certified joint projection when the scaled polar factor is feasible;
+# stop if its row norms violate the bound, since row clipping is not equivalent.
+project_C_U_certified <- function(
+  Z, bound, row_tolerance = 1e-10, gram_tolerance = 1e-10,
+  objective_tolerance = 1e-10, context = ""
+) {
+  if (!is.matrix(Z) || !is.numeric(Z) || any(!is.finite(Z))) {
+    stop("Z must be a finite numeric matrix in the C_U projection.")
+  }
+  n <- nrow(Z)
+  k <- ncol(Z)
+  if (k < 1L || n < k || length(bound) != 1L ||
+      !is.finite(bound) || bound < sqrt(k)) {
+    stop("C_U is infeasible: require n >= k and M_bound_U >= sqrt(k).")
+  }
+
+  # The scaled polar factor is a global Euclidean projection onto
+  # {U: U^T U = n I_k}. If it also satisfies the row-norm bound, it is
+  # therefore a global projection onto the intersection C_U. When the row
+  # bound is active, clipping would destroy U^T U = n I_k; fail explicitly
+  # instead of silently replacing the theoretical joint projection.
+  decomposition <- svd(Z, nu = k, nv = k)
+  U <- sqrt(n) * decomposition$u[, seq_len(k), drop = FALSE] %*%
+    t(decomposition$v[, seq_len(k), drop = FALSE])
+  gram_error <- max(abs(crossprod(U) / n - diag(k)))
+  max_row_norm <- max(sqrt(rowSums(U^2)))
+  row_violation <- max(0, max_row_norm - bound)
+  objective <- 0.5 * sum((U - Z)^2)
+  stiefel_lower_bound <- 0.5 * (
+    sum(Z^2) + n * k - 2 * sqrt(n) * sum(decomposition$d)
+  )
+  objective_gap <- abs(objective - stiefel_lower_bound)
+  objective_scale <- max(1, abs(objective), abs(stiefel_lower_bound))
+  if (gram_error > gram_tolerance) {
+    stop(sprintf(
+      "The scaled-polar projection failed its Gram check: %.4e > %.4e.",
+      gram_error, gram_tolerance
+    ))
+  }
+  if (objective_gap > objective_tolerance * objective_scale) {
+    stop(sprintf(
+      "The scaled-polar objective certificate failed: gap %.4e.",
+      objective_gap
+    ))
+  }
+  if (row_violation > row_tolerance * max(1, bound)) {
+    message_text <- sprintf(
+      paste0(
+        "Certified joint C_U projection unavailable%s: scaled-polar row ",
+        "norm %.16g exceeds M_bound_U %.16g by %.4e. The run must stop; ",
+        "row clipping is not a joint Euclidean projection."
+      ),
+      if (nzchar(context)) paste0(" [", context, "]") else "",
+      max_row_norm, bound, row_violation
+    )
+    condition <- structure(
+      list(
+        message = message_text, call = NULL, context = context,
+        row_max = max_row_norm, bound = bound,
+        row_violation = row_violation, gram_error = gram_error,
+        objective_gap = objective_gap
+      ),
+      class = c("active_U_row_bound", "error", "condition")
+    )
+    stop(condition)
+  }
+
+  list(
+    U = U,
+    method = "polar_exact",
+    max_row_norm = max_row_norm,
+    max_row_ratio = max_row_norm / bound,
+    row_violation = row_violation,
+    row_margin = bound - max_row_norm,
+    gram_error = gram_error,
+    objective_gap = objective_gap
+  )
+}
+
+# Project symmetric Lambda onto the operator-norm ball by clipping eigenvalues.
+proximal_projection_Lambda <- function(Lambda, bound) {
+  eg <- eigen(symmetrize(Lambda), symmetric = TRUE)
+  vals <- pmax(pmin(eg$values, bound), -bound)
+  symmetrize(eg$vectors %*% diag(vals, length(vals)) %*% t(eg$vectors))
+}
+
+# Measure the U and lambda_v projected updates relative to their actual steps.
+projected_gradient_mapping_components <- function(
+  U, U_next, Lambda, Lambda_next, learning_rate, n
+) {
+  if (!is.finite(learning_rate) || learning_rate <= 0 ||
+      !is.finite(n) || n <= 0) {
+    stop("learning_rate and n must be positive in the residual calculation.")
+  }
+  eta_U <- learning_rate / n
+  eta_Lambda_v <- learning_rate / (2 * n^2)
+  c(
+    U = max(abs(U_next - U)) / eta_U,
+    Lambda_v = max(abs(
+      get_lambda_v(Lambda_next) - get_lambda_v(Lambda)
+    )) / eta_Lambda_v
+  )
+}
+
+# --------------------- Distribution quantities ------------------
+
+# Compute normal probabilities and stable density-to-tail ratios for probit.
+probit_ratios <- function(theta) {
+  log_phi <- dnorm(theta, log = TRUE)
+  log_p1 <- pnorm(theta, log.p = TRUE)
+  log_p0 <- pnorm(theta, lower.tail = FALSE, log.p = TRUE)
+  list(
+    p1 = pnorm(theta),
+    p0 = pnorm(theta, lower.tail = FALSE),
+    a = exp(log_phi - log_p1),
+    b = exp(log_phi - log_p0),
+    log_phi = log_phi,
+    log_p1 = log_p1,
+    log_p0 = log_p0
+  )
+}
+
+# Map predictors to edge means (probabilities only for the Bernoulli models).
+link_probability <- function(theta, config) {
+  switch(
+    config$model,
+    bernoulli_logit = sigmoid(theta),
+    bernoulli_probit = pnorm(theta),
+    poisson = exp(theta),
+    gaussian = theta
+  )
+}
+
+# Transform initial edge-mean estimates to predictors, with model-specific clips.
+link_inverse <- function(value, config, eps = config$probability_eps) {
+  switch(
+    config$model,
+    bernoulli_logit = {
+      p <- pmax(pmin(value, 1 - eps), eps)
+      log(p / (1 - p))
+    },
+    bernoulli_probit = qnorm(pmax(pmin(value, 1 - eps), eps)),
+    poisson = log(pmax(value, 0.1)),
+    gaussian = value
+  )
+}
+
+# Sum negative edge log-likelihoods, omitting terms constant in the parameters.
+negative_loglikelihood_edges <- function(theta, y, config) {
+  switch(
+    config$model,
+    bernoulli_logit = sum(stable_log1pexp(theta) - y * theta),
+    bernoulli_probit = {
+      log_p1 <- pnorm(theta, log.p = TRUE)
+      log_p0 <- pnorm(theta, lower.tail = FALSE, log.p = TRUE)
+      -sum(ifelse(y > 0.5, log_p1, log_p0))
+    },
+    gaussian = sum((theta - y)^2) / (2 * config$sigma^2),
+    poisson = sum(exp(theta) - y * theta)
+  )
+}
+
+# Compute elementwise derivatives of the negative log-likelihood in theta.
+negative_score_matrix <- function(theta, A, config) {
+  switch(
+    config$model,
+    bernoulli_logit = sigmoid(theta) - A,
+    bernoulli_probit = {
+      r <- probit_ratios(theta)
+      out <- ifelse(A > 0.5, -r$a, r$b)
+      dim(out) <- dim(theta)
+      out
+    },
+    gaussian = (theta - A) / config$sigma^2,
+    poisson = exp(theta) - A
+  )
+}
+
+# Evaluate Fisher weights and higher likelihood moments used by bias correction.
+expected_derivative_terms <- function(theta, config) {
+  zero <- 0 * theta
+
+  if (config$model == "bernoulli_logit") {
+    p <- sigmoid(theta)
+    information <- p * (1 - p)
+    expected_ell3 <- -information * (1 - 2 * p)
+    return(list(
+      mean_parameter = p,
+      information = information,
+      expected_ell3 = expected_ell3,
+      expected_score_ell2 = zero,
+      observed_information_y1 = information,
+      observed_information_y0 = information
+    ))
+  }
+
+  if (config$model == "bernoulli_probit") {
+    r <- probit_ratios(theta)
+    a <- r$a
+    b <- r$b
+    ell2_1 <- -theta * a - a^2
+    ell3_1 <- a * (theta^2 - 1) + 3 * theta * a^2 + 2 * a^3
+    ell2_0 <- theta * b - b^2
+    ell3_0 <- b * (1 - theta^2) + 3 * theta * b^2 - 2 * b^3
+    information <- exp(2 * r$log_phi - r$log_p1 - r$log_p0)
+    return(list(
+      mean_parameter = r$p1,
+      information = information,
+      expected_ell3 = information * (3 * theta + 2 * a - 2 * b),
+      expected_score_ell2 = information * (b - a - theta),
+      observed_information_y1 = -ell2_1,
+      observed_information_y0 = -ell2_0,
+      ell3_y1 = ell3_1,
+      ell3_y0 = ell3_0
+    ))
+  }
+
+  if (config$model == "gaussian") {
+    return(list(
+      mean_parameter = theta,
+      information = zero + 1 / config$sigma^2,
+      expected_ell3 = zero,
+      expected_score_ell2 = zero,
+      observed_information_y1 = zero + 1 / config$sigma^2,
+      observed_information_y0 = zero + 1 / config$sigma^2
+    ))
+  }
+
+  intensity <- exp(theta)
+  list(
+    mean_parameter = intensity,
+    information = intensity,
+    expected_ell3 = -intensity,
+    expected_score_ell2 = zero,
+    observed_information_y1 = intensity,
+    observed_information_y0 = intensity
+  )
+}
+
+# These deterministic identities protect the probit branch from silently
+# reverting to the Bernoulli variance p(1-p), which is not the probit Fisher
+# weight. This check is fast and runs once when the Rmd is sourced or knitted.
+validate_probit_derivatives <- function(tolerance = 5e-7) {
+  theta <- seq(-3, 3, length.out = 121L)
+  config <- default_model_configs()$bernoulli_probit
+  r <- probit_ratios(theta)
+  terms <- expected_derivative_terms(theta, config)
+  expected_observed <- r$p1 * terms$observed_information_y1 +
+    r$p0 * terms$observed_information_y0
+  score_mean <- r$p1 * r$a + r$p0 * (-r$b)
+  expected_ell3_outcome <- r$p1 * terms$ell3_y1 + r$p0 * terms$ell3_y0
+  ell2_y1 <- -terms$observed_information_y1
+  ell2_y0 <- -terms$observed_information_y0
+  expected_score_ell2_outcome <-
+    r$p1 * r$a * ell2_y1 + r$p0 * (-r$b) * ell2_y0
+
+  h <- 1e-5
+  numerical_negative_score_y1 <- (
+    -pnorm(theta + h, log.p = TRUE) + pnorm(theta - h, log.p = TRUE)
+  ) / (2 * h)
+  numerical_negative_score_y0 <- (
+    -pnorm(theta + h, lower.tail = FALSE, log.p = TRUE) +
+      pnorm(theta - h, lower.tail = FALSE, log.p = TRUE)
+  ) / (2 * h)
+
+  errors <- c(
+    fisher = max(abs(expected_observed - terms$information)),
+    mean_score = max(abs(score_mean)),
+    higher_moment = max(
+      abs(expected_ell3_outcome - terms$expected_ell3),
+      abs(expected_score_ell2_outcome - terms$expected_score_ell2)
+    ),
+    symmetry = max(
+      abs(terms$information - rev(terms$information)),
+      abs(terms$expected_ell3 + rev(terms$expected_ell3)),
+      abs(terms$expected_score_ell2 + rev(terms$expected_score_ell2))
+    ),
+    numerical_gradient = max(
+      abs(numerical_negative_score_y1 + r$a),
+      abs(numerical_negative_score_y0 - r$b)
+    )
+  )
+  if (any(!is.finite(errors)) || max(errors) > tolerance) {
+    stop(
+      "Probit derivative self-check failed: ",
+      paste(sprintf("%s=%.3e", names(errors), errors), collapse = ", ")
+    )
+  }
+  invisible(errors)
+}
+
+validate_probit_derivatives()
+
+# Evaluate the realized negative second derivative for each observed edge.
+observed_information_matrix <- function(theta, config, A = NULL) {
+  # For Gaussian, logit, and Poisson, the observed negative Hessian is
+  # identical to the expected Fisher information.  Probit is different:
+  # its observed curvature depends on the realized binary outcome.
+  if (config$model != "bernoulli_probit") {
+    return(expected_derivative_terms(theta, config)$information)
+  }
+
+  if (is.null(A)) {
+    stop("A is required for the observed probit information matrix.")
+  }
+  if (!identical(dim(A), dim(theta))) {
+    stop("A and theta must have the same dimensions.")
+  }
+
+  r <- probit_ratios(theta)
+  information_y1 <- r$a * (theta + r$a)
+  information_y0 <- r$b * (r$b - theta)
+  information <- ifelse(A > 0.5, information_y1, information_y0)
+  dim(information) <- dim(theta)
+
+  # Both expressions are nonnegative analytically.  Remove only negative
+  # roundoff caused by tail-ratio cancellation.
+  pmax(information, 0)
+}
+
+# -------------------- Truth and data generation -----------------
+
+# Advisor-style rejection sampling, adapted from:
+# https://github.com/yatian20/DLSM/blob/main/simulation.R
+# Accepted rows are iid uniform in the UNIT K-ball:
+# E(z_i)=0, E(z_i z_i^T)=I_k/(k+2), and ||z_i||<1.
+# Use repeated bounded batches so a short batch never creates missing rows.
+# batch_size is exposed for small-batch checks; normal runs use n*2^k,
+# capped at 50,000 candidate rows per batch to limit allocation size.
+sample_unit_ball_rejection <- function(n, k, batch_size = NULL) {
+  positive_integer <- function(x) {
+    is.numeric(x) && length(x) == 1L && is.finite(x) &&
+      x >= 1 && x == floor(x) && x <= .Machine$integer.max
+  }
+  if (!positive_integer(n) || !positive_integer(k) || n <= k) {
+    stop("Ball-rejection design requires integer n > k >= 1.")
+  }
+  if (is.null(batch_size)) batch_size <- min(50000, n * 2^k)
+  if (!positive_integer(batch_size) || batch_size > 50000) {
+    stop("batch_size must be an integer between 1 and 50000.")
+  }
+  n <- as.integer(n)
+  k <- as.integer(k)
+  batch_size <- as.integer(batch_size)
+  Z <- matrix(0, nrow = n, ncol = k)
+  filled <- 0L
+  candidate_count <- accepted_count <- batch_count <- 0
+  while (filled < n) {
+    candidates <- matrix(
+      runif(as.double(batch_size) * k, -1, 1),
+      nrow = batch_size, ncol = k
+    )
+    accepted <- candidates[rowSums(candidates^2) < 1, , drop = FALSE]
+    candidate_count <- candidate_count + batch_size
+    accepted_count <- accepted_count + nrow(accepted)
+    batch_count <- batch_count + 1
+    take <- min(n - filled, nrow(accepted))
+    if (take > 0L) {
+      Z[filled + seq_len(take), ] <- accepted[seq_len(take), , drop = FALSE]
+      filled <- filled + take
+    }
+  }
+  list(
+    Z = Z,
+    candidate_count = candidate_count,
+    accepted_count = accepted_count,
+    batch_count = batch_count,
+    acceptance_rate = accepted_count / candidate_count
+  )
+}
+
+# Whiten the uncentered empirical SECOND MOMENT of the accepted rows.
+# No sample-centering or advisor-style scalar normalization is applied.
+# U=Z(Z^T Z/n)^(-1/2) satisfies U^T U=nI_k.
+# Whitened rows share a sample-dependent transform and are no longer iid.
+# Their norms can exceed 1; record raw and post-whitening norms separately.
+generate_uniform_ball_rejection_whitened_no_centering_U <- function(
+  n, k, design_seed, eigen_floor = 1e-10
+) {
+  set_reproducible_seed(design_seed)
+  sampled <- sample_unit_ball_rejection(n, k)
+  Z <- sampled$Z
+  raw_radius_bound <- 1
+  raw_row_norms <- sqrt(rowSums(Z^2))
+
+  sample_second_moment <- crossprod(Z) / n
+  inverse_sqrt <- symmetric_inverse_sqrt(
+    sample_second_moment, eigen_floor
+  )
+  U <- Z %*% inverse_sqrt
+
+  second_moment_eigenvalues <- sort(
+    eigen(
+      sample_second_moment, symmetric = TRUE, only.values = TRUE
+    )$values
+  )
+  list(
+    U_star = U,
+    diagnostics = list(
+      truth_design = "uniform_ball_rejection_whitened_no_centering",
+      sampling_method = "cube_rejection_unit_ball",
+      rejection_candidate_count = sampled$candidate_count,
+      rejection_accepted_count = sampled$accepted_count,
+      rejection_batch_count = sampled$batch_count,
+      rejection_acceptance_rate = sampled$acceptance_rate,
+      design_seed = as.integer(design_seed),
+      raw_ball_radius_bound = raw_radius_bound,
+      raw_max_abs_entry = max(abs(Z)),
+      raw_max_row_norm = max(raw_row_norms),
+      raw_row_norm_quantiles = unname(quantile(
+        raw_row_norms, probs = c(0, 0.25, 0.5, 0.75, 1)
+      )),
+      raw_max_abs_column_mean = max(abs(colMeans(Z))),
+      sample_second_moment_eigenvalues = second_moment_eigenvalues,
+      sample_second_moment_condition_number =
+        max(second_moment_eigenvalues) / min(second_moment_eigenvalues),
+      whitened_max_abs_column_mean = max(abs(colMeans(U))),
+      whitened_gram_max_abs_error =
+        max(abs(crossprod(U) - n * diag(k))),
+      whitened_max_row_norm = max(sqrt(rowSums(U^2)))
+    )
+  )
+}
+
+# Summarize the realized latent design, edge ranges, and oracle node information.
+calculate_truth_diagnostics <- function(
+  U_star, Lambda_star, Theta_star, config, design_diagnostics
+) {
+  n <- nrow(U_star)
+  k <- ncol(U_star)
+  upper <- upper.tri(Theta_star, diag = FALSE)
+  target_other <- setdiff(seq_len(n), config$target_node)
+  terms <- expected_derivative_terms(Theta_star, config)
+  mean_parameter <- terms$mean_parameter
+  expected_information <- terms$information
+  worst_outcome_observed_curvature <- pmin(
+    terms$observed_information_y1,
+    terms$observed_information_y0
+  )
+
+  if (any(!is.finite(c(
+    Theta_star[upper], mean_parameter[upper],
+    expected_information[upper],
+    worst_outcome_observed_curvature[upper]
+  )))) {
+    stop("The generated truth contains a non-finite model quantity.")
+  }
+
+  W <- U_star %*% Lambda_star
+  target_W <- W[target_other, , drop = FALSE]
+  target_information <- expected_information[
+    config$target_node, target_other
+  ]
+  oracle_node_information <- symmetrize(
+    crossprod(target_W, target_information * target_W)
+  )
+  lambda_operator_norm <- max(abs(
+    eigen(Lambda_star, symmetric = TRUE, only.values = TRUE)$values
+  ))
+  maximum_row_norm <- max(sqrt(rowSums(U_star^2)))
+  is_bernoulli <- config$model %in%
+    c("bernoulli_logit", "bernoulli_probit")
+
+  c(
+    design_diagnostics,
+    list(
+      n = n,
+      k = k,
+      model = config$model,
+      target_node = config$target_node,
+      target_position = as.numeric(U_star[config$target_node, ]),
+      lambda_values = diag(Lambda_star),
+      maximum_row_norm = maximum_row_norm,
+      gram_max_abs_error = max(abs(crossprod(U_star) - n * diag(k))),
+      lambda_operator_norm = lambda_operator_norm,
+      global_theta_range = range(Theta_star[upper]),
+      target_theta_range = range(
+        Theta_star[config$target_node, target_other]
+      ),
+      global_mean_parameter_range = range(mean_parameter[upper]),
+      target_mean_parameter_range = range(
+        mean_parameter[config$target_node, target_other]
+      ),
+      global_probability_range = if (is_bernoulli) {
+        range(mean_parameter[upper])
+      } else c(NA_real_, NA_real_),
+      target_probability_range = if (is_bernoulli) {
+        range(mean_parameter[config$target_node, target_other])
+      } else c(NA_real_, NA_real_),
+      global_min_bernoulli_variance = if (is_bernoulli) {
+        min(mean_parameter[upper] * (1 - mean_parameter[upper]))
+      } else NA_real_,
+      global_min_expected_information = min(expected_information[upper]),
+      global_min_worst_outcome_observed_curvature = min(
+        worst_outcome_observed_curvature[upper]
+      ),
+      target_min_expected_information = min(target_information),
+      target_min_worst_outcome_observed_curvature = min(
+        worst_outcome_observed_curvature[config$target_node, target_other]
+      ),
+      oracle_node_information_eigenvalues = sort(
+        eigen(
+          oracle_node_information,
+          symmetric = TRUE,
+          only.values = TRUE
+        )$values
+      ),
+      oracle_node_information_eigenvalues_per_n = sort(
+        eigen(
+          oracle_node_information,
+          symmetric = TRUE,
+          only.values = TRUE
+        )$values
+      ) / n,
+      maximum_abs_theta = max(abs(Theta_star[upper])),
+      analytical_theta_bound =
+        maximum_row_norm^2 * lambda_operator_norm,
+      probability_floor = config$probability_floor,
+      curvature_floor = config$curvature_floor,
+      node_information_floor = config$node_information_floor,
+      truth_check_action = config$truth_check_action
+    )
+  )
+}
+
+# Check truth constraints and apply the requested regularity warning/error policy.
+apply_truth_checks <- function(diagnostics, config, tolerance = 1e-8) {
+  if (!is.null(diagnostics$raw_ball_radius_bound) &&
+      diagnostics$raw_max_row_norm >
+        diagnostics$raw_ball_radius_bound + tolerance) {
+    stop("The raw uniform-ball row-norm bound failed.")
+  }
+  if (diagnostics$gram_max_abs_error > tolerance) {
+    stop("Whitened U_star failed U_star^T U_star=nI_k.")
+  }
+  if (diagnostics$maximum_abs_theta >
+      diagnostics$analytical_theta_bound + tolerance) {
+    stop("The analytical bound on max |Theta_star| failed.")
+  }
+  if (diagnostics$maximum_row_norm > config$M_bound_U + tolerance) {
+    stop(
+      "The realized truth violates M_bound_U; increase M_bound_U."
+    )
+  }
+  if (diagnostics$lambda_operator_norm >
+      config$M_bound_Lambda + tolerance) {
+    stop("The realized truth violates M_bound_Lambda.")
+  }
+
+  issues <- character()
+  if (config$model %in% c("bernoulli_logit", "bernoulli_probit") &&
+      !is.na(config$probability_floor)) {
+    p_range <- diagnostics$global_probability_range
+    if (p_range[1L] < config$probability_floor ||
+        p_range[2L] > 1 - config$probability_floor) {
+      issues <- c(issues, sprintf(
+        paste0(
+          "probability range [%.6g, %.6g] is outside ",
+          "[%.6g, %.6g]"
+        ),
+        p_range[1L], p_range[2L], config$probability_floor,
+        1 - config$probability_floor
+      ))
+    }
+  }
+  if (!is.na(config$curvature_floor)) {
+    if (diagnostics$global_min_expected_information <
+        config$curvature_floor) {
+      issues <- c(issues, sprintf(
+        "minimum expected Fisher %.6g is below %.6g",
+        diagnostics$global_min_expected_information,
+        config$curvature_floor
+      ))
+    }
+    if (diagnostics$global_min_worst_outcome_observed_curvature <
+        config$curvature_floor) {
+      issues <- c(issues, sprintf(
+        paste0(
+          "minimum possible (worst-outcome) observed curvature ",
+          "%.6g is below %.6g"
+        ),
+        diagnostics$global_min_worst_outcome_observed_curvature,
+        config$curvature_floor
+      ))
+    }
+  }
+  if (!is.na(config$node_information_floor) &&
+      min(diagnostics$oracle_node_information_eigenvalues_per_n) <
+        config$node_information_floor) {
+    issues <- c(issues, sprintf(
+      paste0(
+        "minimum oracle target-node information eigenvalue/n %.6g ",
+        "is below %.6g"
+      ),
+      min(diagnostics$oracle_node_information_eigenvalues_per_n),
+      config$node_information_floor
+    ))
+  }
+
+  if (length(issues) && config$truth_check_action != "none") {
+    message_text <- paste0(
+      "Truth regularity check: ", paste(unique(issues), collapse = "; "),
+      ". This is a property of the selected pilot setting, not an ",
+      "estimation-code error."
+    )
+    if (config$truth_check_action == "error") stop(message_text)
+    warning(message_text, call. = FALSE, immediate. = TRUE)
+  }
+  invisible(issues)
+}
+
+# Print the selected truth and its numerical regularity diagnostics.
+print_truth_diagnostics <- function(diagnostics) {
+  cat("\n================ Truth Diagnostics ================\n")
+  cat("Model:", diagnostics$model, "\n")
+  cat(sprintf(
+    "n: %d; k: %d; Theorem 1 chi-square df: %d; Theorem 2 df: %d\n",
+    diagnostics$n, diagnostics$k, diagnostics$k,
+    diagnostics$k * (diagnostics$k + 1L) / 2L
+  ))
+  cat(
+    "Lambda diagonal:",
+    paste(format(diagnostics$lambda_values, digits = 8), collapse = ", "),
+    "\n"
+  )
+  cat("Truth design:", diagnostics$truth_design, "\n")
+  cat("Design seed:", diagnostics$design_seed, "\n")
+  cat(sprintf(
+    "Rejection sampling: %.0f batches, %.0f candidates, acceptance %.4f\n",
+    diagnostics$rejection_batch_count,
+    diagnostics$rejection_candidate_count,
+    diagnostics$rejection_acceptance_rate
+  ))
+  cat(sprintf(
+    paste0(
+      "Raw ball radius bound: %.6f; realized raw max row norm: %.6f\n"
+    ),
+    diagnostics$raw_ball_radius_bound,
+    diagnostics$raw_max_row_norm
+  ))
+  cat(
+    "Raw row-norm quantiles (0%,25%,50%,75%,100%):",
+    paste(sprintf("%.6f", diagnostics$raw_row_norm_quantiles),
+          collapse = ", "),
+    "\n"
+  )
+  cat(
+    "Uncentered sample second-moment eigenvalues:",
+    paste(sprintf("%.6f", diagnostics$sample_second_moment_eigenvalues),
+          collapse = ", "),
+    "\n"
+  )
+  cat(sprintf(
+    "Sample second-moment condition number: %.6f\n",
+    diagnostics$sample_second_moment_condition_number
+  ))
+  cat(sprintf(
+    paste0(
+      "After whitening: max row norm %.6f; max |column mean| %.3e; ",
+      "max |U^T U-nI| %.3e (no centering constraint)\n"
+    ),
+    diagnostics$maximum_row_norm,
+    diagnostics$whitened_max_abs_column_mean,
+    diagnostics$gram_max_abs_error
+  ))
+  cat(sprintf(
+    "Theta range: [%.6f, %.6f]; analytical max-|Theta| bound %.6f\n",
+    diagnostics$global_theta_range[1L],
+    diagnostics$global_theta_range[2L],
+    diagnostics$analytical_theta_bound
+  ))
+  if (diagnostics$model %in% c("bernoulli_logit", "bernoulli_probit")) {
+    cat(sprintf(
+      "Probability range: [%.8g, %.8g]\n",
+      diagnostics$global_probability_range[1L],
+      diagnostics$global_probability_range[2L]
+    ))
+    cat(sprintf(
+      "Minimum Bernoulli variance p(1-p): %.8g\n",
+      diagnostics$global_min_bernoulli_variance
+    ))
+  } else {
+    cat(sprintf(
+      "Mean-parameter range: [%.8g, %.8g]\n",
+      diagnostics$global_mean_parameter_range[1L],
+      diagnostics$global_mean_parameter_range[2L]
+    ))
+  }
+  cat(sprintf(
+    paste0(
+      "Minimum expected Fisher: %.8g; minimum possible ",
+      "(worst-outcome) observed curvature: %.8g\n"
+    ),
+    diagnostics$global_min_expected_information,
+    diagnostics$global_min_worst_outcome_observed_curvature
+  ))
+  cat(
+    "Oracle target-node information eigenvalues / n:",
+    paste(
+      sprintf("%.8g", diagnostics$oracle_node_information_eigenvalues_per_n),
+      collapse = ", "
+    ),
+    "\n"
+  )
+  if (!is.na(diagnostics$probability_floor)) {
+    cat(sprintf(
+      "Requested probability interval: [%.6g, %.6g]\n",
+      diagnostics$probability_floor,
+      1 - diagnostics$probability_floor
+    ))
+  }
+  if (!is.na(diagnostics$curvature_floor)) {
+    cat(sprintf(
+      "Requested Fisher/worst-outcome-curvature floor: %.6g\n",
+      diagnostics$curvature_floor
+    ))
+  }
+  if (!is.na(diagnostics$node_information_floor)) {
+    cat(sprintf(
+      "Requested target-node information eigenvalue/n floor: %.6g\n",
+      diagnostics$node_information_floor
+    ))
+  }
+  if (length(diagnostics$regularity_issues)) {
+    cat(
+      "Regularity warnings:",
+      paste(diagnostics$regularity_issues, collapse = "; "),
+      "\n"
+    )
+  } else {
+    cat("Regularity warnings: none\n")
+  }
+  cat("Truth check action:", diagnostics$truth_check_action, "\n")
+  cat("===================================================\n")
+  invisible(diagnostics)
+}
+
+# Construct one latent design, Lambda_star, and edge means shared by replications.
+generate_truth <- function(config) {
+  if (config$truth_design != "uniform_ball_rejection_whitened_no_centering") {
+    stop("Unsupported truth_design: ", config$truth_design)
+  }
+  design <- generate_uniform_ball_rejection_whitened_no_centering_U(
+    n = config$n,
+    k = config$k,
+    design_seed = config$design_seed,
+    eigen_floor = config$whitening_eigen_floor
+  )
+  U_star <- design$U_star
+  Lambda_star <- diag(config$lambda_vec, config$k, config$k)
+  Theta_star <- U_star %*% Lambda_star %*% t(U_star)
+  diag(Theta_star) <- 0
+  mean_star <- link_probability(Theta_star, config)
+  diag(mean_star) <- 0
+  diagnostics <- calculate_truth_diagnostics(
+    U_star, Lambda_star, Theta_star, config, design$diagnostics
+  )
+  diagnostics$regularity_issues <- apply_truth_checks(diagnostics, config)
+  list(
+    U_star = U_star,
+    Lambda_star = Lambda_star,
+    Theta_star = Theta_star,
+    mean_star = mean_star,
+    P_star = if (
+      config$model %in% c("bernoulli_logit", "bernoulli_probit")
+    ) mean_star else NULL,
+    design_seed = config$design_seed,
+    diagnostics = diagnostics
+  )
+}
+
+# Draw independent upper-triangle edges conditional on truth, then mirror them.
+generate_network_rep <- function(truth, config, replication_seed) {
+  set_reproducible_seed(replication_seed)
+  n <- config$n
+  upper <- upper.tri(matrix(0, n, n), diag = FALSE)
+  theta <- truth$Theta_star[upper]
+  mean_parameter <- truth$mean_star[upper]
+  values <- switch(
+    config$model,
+    bernoulli_logit = as.numeric(
+      runif(length(theta)) < mean_parameter
+    ),
+    bernoulli_probit = as.numeric(
+      runif(length(theta)) < mean_parameter
+    ),
+    gaussian = theta + rnorm(length(theta), 0, config$sigma),
+    poisson = rpois(length(theta), mean_parameter)
+  )
+  A <- matrix(0, n, n)
+  A[upper] <- values
+  A <- A + t(A)
+  diag(A) <- 0
+  A
+}
+
+# -------------------- Spectral initialization -------------------
+
+# Select singular directions above the initialization threshold, keeping >= K.
+spectral_keep_indices <- function(singular_values, k, offset) {
+  p <- length(singular_values)
+  threshold_index <- k + offset + 1L
+  threshold <- if (threshold_index <= p) {
+    singular_values[threshold_index] + 1e-6
+  } else {
+    0
+  }
+  keep <- which(singular_values > threshold)
+  if (length(keep) < k) keep <- seq_len(min(k, p))
+  keep
+}
+
+# Initialize U and Lambda from a model-specific transformed spectral estimate.
+initialize_spectral <- function(A, config) {
+  n <- nrow(A)
+  k <- config$k
+  sv <- svd(A)
+
+  if (config$model %in% c("bernoulli_logit", "bernoulli_probit")) {
+    keep <- spectral_keep_indices(sv$d, k, offset = 2L)
+    P_tilde <- sv$u[, keep, drop = FALSE] %*%
+      diag(sv$d[keep], length(keep)) %*% t(sv$v[, keep, drop = FALSE])
+    P_tilde <- pmax(
+      pmin(symmetrize(P_tilde), 1 - config$probability_eps),
+      config$probability_eps
+    )
+    Theta_tilde <- symmetrize(link_inverse(P_tilde, config))
+  } else if (config$model == "gaussian") {
+    keep <- spectral_keep_indices(sv$d, k, offset = 0L)
+    Theta_tilde <- sv$u[, keep, drop = FALSE] %*%
+      diag(sv$d[keep], length(keep)) %*% t(sv$v[, keep, drop = FALSE])
+    Theta_tilde <- symmetrize(Theta_tilde)
+  } else {
+    keep <- spectral_keep_indices(sv$d, k, offset = 2L)
+    intensity_tilde <- sv$u[, keep, drop = FALSE] %*%
+      diag(sv$d[keep], length(keep)) %*% t(sv$v[, keep, drop = FALSE])
+    intensity_tilde <- pmax(symmetrize(intensity_tilde), 0.1)
+    Theta_tilde <- symmetrize(log(intensity_tilde))
+  }
+
+  diag(Theta_tilde) <- 0
+  eg <- eigen(Theta_tilde, symmetric = TRUE)
+  idx <- order(abs(eg$values), decreasing = TRUE)[seq_len(k)]
+  list(
+    U_init = sqrt(n) * eg$vectors[, idx, drop = FALSE],
+    Lambda_init = diag(eg$values[idx] / n, k, k)
+  )
+}
+
+# -------------------- Objective, gradient, PGD ------------------
+
+# Evaluate the network objective using each off-diagonal edge exactly once.
+calculate_objective_network <- function(U, Lambda, A, config) {
+  Theta <- U %*% Lambda %*% t(U)
+  diag(Theta) <- 0
+  upper <- upper.tri(A, diag = FALSE)
+  negative_loglikelihood_edges(Theta[upper], A[upper], config)
+}
+
+# Assemble U and symmetric-Lambda update gradients, excluding diagonal entries.
+calculate_gradient_network <- function(U, Lambda, A, config) {
+  Theta <- U %*% Lambda %*% t(U)
+  diag(Theta) <- 0
+  D <- negative_score_matrix(Theta, A, config)
+  diag(D) <- 0
+  grad_Lambda <- 0.5 * t(U) %*% D %*% U
+  list(
+    grad_U = D %*% U %*% Lambda,
+    grad_Lambda = symmetrize(grad_Lambda)
+  )
+}
+
+# Fit one network by projected gradient descent and return convergence diagnostics.
+run_pgd_network <- function(A, config) {
+  n <- config$n
+  init <- initialize_spectral(A, config)
+  U_projection <- project_C_U_certified(
+    init$U_init, config$M_bound_U, context = "spectral initialization"
+  )
+  U_hat <- U_projection$U
+  Lambda_hat <- proximal_projection_Lambda(
+    init$Lambda_init, config$M_bound_Lambda
+  )
+
+  convergence_code <- 1L
+  scaled_gradient <- Inf
+  projected_residual_U <- Inf
+  projected_residual_Lambda_v <- Inf
+  iter_done <- 0L
+  projection_calls <- 1L
+  projection_max_row_ratio <- U_projection$max_row_ratio
+  projection_min_row_margin <- U_projection$row_margin
+  projection_max_gram_error <- U_projection$gram_error
+  projection_max_objective_gap <- U_projection$objective_gap
+
+  for (iter in seq_len(config$max_iter)) {
+    grads <- calculate_gradient_network(U_hat, Lambda_hat, A, config)
+    U_projection <- project_C_U_certified(
+      U_hat - config$learning_rate * grads$grad_U / n,
+      config$M_bound_U, context = sprintf("PGD iteration %d", iter)
+    )
+    U_next <- U_projection$U
+    projection_calls <- projection_calls + 1L
+    projection_max_row_ratio <- max(
+      projection_max_row_ratio, U_projection$max_row_ratio
+    )
+    projection_min_row_margin <- min(
+      projection_min_row_margin, U_projection$row_margin
+    )
+    projection_max_gram_error <- max(
+      projection_max_gram_error, U_projection$gram_error
+    )
+    projection_max_objective_gap <- max(
+      projection_max_objective_gap, U_projection$objective_gap
+    )
+    Lambda_next <- proximal_projection_Lambda(
+      Lambda_hat - config$learning_rate * grads$grad_Lambda / n^2,
+      config$M_bound_Lambda
+    )
+
+    # On the orthogonality-constrained parameter space, the raw Euclidean
+    # gradient need not vanish at the optimum. The mapping must be divided by
+    # the effective steps actually used by the code: eta_U = lr/n and, under
+    # the paper's lambda_v parameterization, eta_lambda_v = lr/(2 n^2).
+    residuals <- projected_gradient_mapping_components(
+      U_hat, U_next, Lambda_hat, Lambda_next,
+      config$learning_rate, n
+    )
+    projected_residual_U <- residuals[["U"]]
+    projected_residual_Lambda_v <- residuals[["Lambda_v"]]
+    scaled_gradient <- max(residuals)
+    if (!is.finite(scaled_gradient)) {
+      convergence_code <- 2L
+      break
+    }
+    U_hat <- U_next
+    Lambda_hat <- Lambda_next
+    iter_done <- iter
+    if (scaled_gradient < config$tolerance) {
+      convergence_code <- 0L
+      break
+    }
+  }
+
+  # The final update can itself cross the tolerance. Re-evaluate at the
+  # returned iterate so a max-iteration exit is classified correctly.
+  if (convergence_code == 1L) {
+    final_grads <- calculate_gradient_network(U_hat, Lambda_hat, A, config)
+    final_U_projection <- project_C_U_certified(
+      U_hat - config$learning_rate * final_grads$grad_U / n,
+      config$M_bound_U, context = "final residual check"
+    )
+    final_U_next <- final_U_projection$U
+    projection_calls <- projection_calls + 1L
+    projection_max_row_ratio <- max(
+      projection_max_row_ratio, final_U_projection$max_row_ratio
+    )
+    projection_min_row_margin <- min(
+      projection_min_row_margin, final_U_projection$row_margin
+    )
+    projection_max_gram_error <- max(
+      projection_max_gram_error, final_U_projection$gram_error
+    )
+    projection_max_objective_gap <- max(
+      projection_max_objective_gap, final_U_projection$objective_gap
+    )
+    final_Lambda_next <- proximal_projection_Lambda(
+      Lambda_hat -
+        config$learning_rate * final_grads$grad_Lambda / n^2,
+      config$M_bound_Lambda
+    )
+    final_residuals <- projected_gradient_mapping_components(
+      U_hat, final_U_next, Lambda_hat, final_Lambda_next,
+      config$learning_rate, n
+    )
+    projected_residual_U <- final_residuals[["U"]]
+    projected_residual_Lambda_v <- final_residuals[["Lambda_v"]]
+    scaled_gradient <- max(final_residuals)
+    if (!is.finite(scaled_gradient)) {
+      convergence_code <- 2L
+    } else if (scaled_gradient < config$tolerance) {
+      convergence_code <- 0L
+    }
+  }
+
+  final_objective <- calculate_objective_network(U_hat, Lambda_hat, A, config)
+  if (!is.finite(final_objective)) convergence_code <- 2L
+  list(
+    U_hat = U_hat,
+    Lambda_hat = symmetrize(Lambda_hat),
+    convergence_code = convergence_code,
+    n_iter = iter_done,
+    scaled_gradient = scaled_gradient,
+    projected_residual_U = projected_residual_U,
+    projected_residual_Lambda_v = projected_residual_Lambda_v,
+    projection_calls = projection_calls,
+    projection_max_row_ratio = projection_max_row_ratio,
+    projection_min_row_margin = projection_min_row_margin,
+    projection_max_gram_error = projection_max_gram_error,
+    projection_max_objective_gap = projection_max_objective_gap,
+    final_objective = final_objective
+  )
+}
+
+# ---------------- Rotation and node-wise inference ---------------
+
+# Align the fitted latent basis to the known truth for simulation comparisons.
+# This oracle rotation cannot be performed when analyzing an unknown real truth.
+rotate_estimator <- function(U_hat, Lambda_hat, U_star) {
+  n <- nrow(U_hat)
+  if (nrow(U_star) != n || ncol(U_hat) != ncol(U_star)) {
+    stop("U_hat and U_star must have identical dimensions for rotation.")
+  }
+  alignment_cross_gram <- crossprod(U_hat, U_star) / n
+  sv <- svd(alignment_cross_gram)
+  Q_transpose <- sv$u %*% t(sv$v)
+  min_sv <- min(sv$d)
+  max_sv <- max(sv$d)
+  condition_number <- if (
+    is.finite(min_sv) && min_sv > .Machine$double.eps * max_sv
+  ) max_sv / min_sv else Inf
+  list(
+    U_q = U_hat %*% Q_transpose,
+    Lambda_q = symmetrize(t(Q_transpose) %*% Lambda_hat %*% Q_transpose),
+    Q_transpose = Q_transpose,
+    alignment_min_singular_value = min_sv,
+    alignment_condition_number = condition_number
+  )
+}
+
+# Compute the fitted observed-information matrix for one node's K coordinates.
+calculate_node_information <- function(U, Lambda, node_idx, config, A = NULL) {
+  Theta <- U %*% Lambda %*% t(U)
+  diag(Theta) <- 0
+  # Match the PDF's literal Sigma_L definition: use the realized negative
+  # Hessian. For Gaussian, logit, and Poisson this equals expected Fisher;
+  # for probit it depends on the observed edge outcomes in A.
+  V <- observed_information_matrix(Theta, config, A)
+  diag(V) <- 0
+  W <- U %*% Lambda
+  symmetrize(t(W) %*% (V[node_idx, ] * W))
+}
+
+# ------------------ Symmetric 9 information ---------------------
+
+# Build constraint derivatives, using U_anchor for the rotational constraints.
+build_D_UG <- function(U, U_anchor) {
+  n <- nrow(U)
+  k <- ncol(U)
+  if (!identical(dim(U_anchor), dim(U))) {
+    stop("U and U_anchor must have identical dimensions in build_D_UG().")
+  }
+  DUG <- matrix(0, n * k, k^2)
+
+  for (a in seq_len(k)) {
+    DUG[seq(a, n * k, by = k), a] <- U[, a]
+  }
+
+  pair <- 1L
+  if (k >= 2L) {
+    for (a in seq_len(k - 1L)) {
+      for (b in seq.int(a + 1L, k)) {
+        col_g2 <- k + pair
+        col_g3 <- k + k * (k - 1L) / 2L + pair
+        rows_a <- seq(a, n * k, by = k)
+        rows_b <- seq(b, n * k, by = k)
+        DUG[rows_a, col_g2] <- U[, b] / sqrt(2)
+        DUG[rows_b, col_g2] <- U[, a] / sqrt(2)
+        DUG[rows_a, col_g3] <- U_anchor[, b] / sqrt(2)
+        DUG[rows_b, col_g3] <- -U_anchor[, a] / sqrt(2)
+        pair <- pair + 1L
+      }
+    }
+  }
+
+  if (any(!is.finite(DUG))) stop("D_UG contains non-finite entries.")
+  DUG
+}
+
+# Assemble joint information, its nuisance projector, and efficient information.
+# Retain expected node blocks separately for the higher-order bias formulas.
+build_information_blocks <- function(U, Lambda, U_anchor, config, A = NULL) {
+  n <- nrow(U)
+  k <- ncol(U)
+  d <- k * (k + 1L) / 2L
+  Theta <- U %*% Lambda %*% t(U)
+  diag(Theta) <- 0
+  # Match the PDF's realized negative-Hessian information blocks. For probit
+  # this uses the observed outcomes; for the other models it equals Fisher.
+  V <- observed_information_matrix(Theta, config, A)
+  V_expected <- expected_derivative_terms(Theta, config)$information
+  diag(V) <- 0
+  diag(V_expected) <- 0
+  W <- U %*% Lambda
+
+  SUU <- matrix(0, n * k, n * k)
+  SUL <- matrix(0, n * k, d)
+  SLL <- matrix(0, d, d)
+  expected_blocks <- lapply(seq_len(n), function(i) matrix(0, k, k))
+
+  for (i in seq_len(n - 1L)) {
+    ii <- ((i - 1L) * k + 1L):(i * k)
+    for (j in seq.int(i + 1L, n)) {
+      jj <- ((j - 1L) * k + 1L):(j * k)
+      v <- V[i, j]
+      v_expected <- V_expected[i, j]
+      wi <- W[i, ]
+      wj <- W[j, ]
+      ld <- lambda_direction_derivative(U[i, ], U[j, ])
+
+      SUU[ii, ii] <- SUU[ii, ii] + v * tcrossprod(wj)
+      SUU[jj, jj] <- SUU[jj, jj] + v * tcrossprod(wi)
+      cross <- v * tcrossprod(wj, wi)
+      SUU[ii, jj] <- SUU[ii, jj] + cross
+      SUU[jj, ii] <- SUU[jj, ii] + t(cross)
+      SUL[ii, ] <- SUL[ii, ] + v * tcrossprod(wj, ld)
+      SUL[jj, ] <- SUL[jj, ] + v * tcrossprod(wi, ld)
+      SLL <- SLL + v * tcrossprod(ld)
+      expected_blocks[[i]] <- expected_blocks[[i]] +
+        v_expected * tcrossprod(wj)
+      expected_blocks[[j]] <- expected_blocks[[j]] +
+        v_expected * tcrossprod(wi)
+    }
+  }
+
+  SUU <- symmetrize(SUU)
+  SLL <- symmetrize(SLL)
+  SLU <- t(SUL)
+  DUG <- build_D_UG(U, U_anchor)
+  DGU <- t(DUG)
+  DGU_DUG <- symmetrize(DGU %*% DUG)
+  DGU_DUG_inverse <- ordinary_inverse_pd(
+    DGU_DUG, "D_GU D_UG nuisance Gram matrix"
+  )
+  # Finite-sample nuisance projector. Do not replace D_GU D_UG by n I:
+  # Pi_nui = D_UG (D_GU D_UG)^+ D_GU. The numerical-rank check above makes
+  # the Moore-Penrose inverse equal to the ordinary inverse used here.
+  Pi_nui <- symmetrize(
+    DUG %*% DGU_DUG_inverse$inverse %*% DGU
+  )
+  PUU <- symmetrize(diag(n * k) - Pi_nui)
+  PUU_idempotence_error <- max(abs(PUU %*% PUU - PUU))
+  PUU_DUG_annihilation_error <- max(abs(PUU %*% DUG))
+  if (PUU_idempotence_error > 1e-8 ||
+      PUU_DUG_annihilation_error > 1e-8 * max(1, max(abs(DUG)))) {
+    stop(sprintf(
+      paste0(
+        "Failed to construct the finite-sample nuisance projector: ",
+        "idempotence error %.4e, annihilation error %.4e."
+      ),
+      PUU_idempotence_error, PUU_DUG_annihilation_error
+    ))
+  }
+  projected <- symmetrize(PUU %*% SUU %*% PUU)
+  projected_inv <- safe_pinv_psd(projected, n_drop = k^2)
+  Seff <- symmetrize(
+    SLL - SLU %*% PUU %*% projected_inv %*% PUU %*% SUL
+  )
+
+  blocks <- lapply(seq_len(n), function(i) {
+    idx <- ((i - 1L) * k + 1L):(i * k)
+    SUU[idx, idx, drop = FALSE]
+  })
+
+  list(
+    SUU = SUU, SUL = SUL, SLU = SLU, SLL = SLL,
+    DUG = DUG, DGU = DGU,
+    DGU_DUG = DGU_DUG,
+    DGU_DUG_inverse = DGU_DUG_inverse$inverse,
+    DUG_gram_error_from_nI = max(abs(DGU_DUG / n - diag(k^2))),
+    DUG_gram_condition_number = DGU_DUG_inverse$condition_number,
+    Pi_nui = Pi_nui, PUU = PUU,
+    PUU_idempotence_error = PUU_idempotence_error,
+    PUU_DUG_annihilation_error = PUU_DUG_annihilation_error,
+    projected_inv = projected_inv,
+    Seff = Seff, blocks = blocks, expected_blocks = expected_blocks
+  )
+}
+
+# ------------------ Bias and debiasing terms --------------------
+
+# Compute B1, BM, and BP terms using expected node information and edge moments.
+calculate_bias_terms <- function(U, Lambda, expected_blocks, config) {
+  n <- nrow(U)
+  k <- ncol(U)
+  d <- k * (k + 1L) / 2L
+  Theta <- U %*% Lambda %*% t(U)
+  diag(Theta) <- 0
+  terms <- expected_derivative_terms(Theta, config)
+  W <- U %*% Lambda
+  inv_blocks <- lapply(expected_blocks, safe_pinv_psd)
+  inverse_sum <- Reduce(`+`, inv_blocks)
+
+  B1U <- numeric(n * k)
+  B1L <- numeric(d)
+  BMU <- numeric(n * k)
+  BML <- numeric(d)
+  BPU_matrix <- 0.5 * U %*% t(inverse_sum)
+
+  for (i in seq_len(n)) {
+    idx_i <- ((i - 1L) * k + 1L):(i * k)
+    wi <- matrix(W[i, ], k, 1L)
+    b1_i <- matrix(0, k, 1L)
+    bm_i <- matrix(0, k, 1L)
+
+    for (j in setdiff(seq_len(n), i)) {
+      wj <- matrix(W[j, ], k, 1L)
+      ld <- lambda_direction_derivative(U[i, ], U[j, ])
+      q_i_j <- as.numeric(t(wi) %*% inv_blocks[[j]] %*% wi)
+      q_j_i <- as.numeric(t(wj) %*% inv_blocks[[i]] %*% wj)
+      e3 <- terms$expected_ell3[i, j]
+      em <- terms$expected_score_ell2[i, j]
+
+      b1_i <- b1_i - 0.5 * e3 * (q_i_j + q_j_i) * wj
+      bm_i <- bm_i + em * (q_i_j + q_j_i) * wj
+      B1L <- B1L - 0.5 * e3 * q_i_j * ld
+      BML <- BML + em * q_i_j * ld
+    }
+    B1U[idx_i] <- as.vector(b1_i)
+    BMU[idx_i] <- as.vector(bm_i)
+  }
+
+  list(
+    B1U = B1U, B1L = B1L,
+    BMU = BMU, BML = BML,
+    BPU = as.vector(t(BPU_matrix))
+  )
+}
+
+# Compute likelihood and penalty corrections in lambda_v coordinates.
+# The caller adds correction_total to lambda_v_hat; U_star is the oracle anchor.
+calculate_debiasing_components <- function(
+  U, Lambda, U_star, config, A = NULL
+) {
+  n <- nrow(U)
+  info <- build_information_blocks(U, Lambda, U_star, config, A = A)
+  SLL_inverse <- ordinary_inverse_pd(
+    info$SLL, "Theorem 2 Lambda information"
+  )
+  Seff_inverse <- ordinary_inverse_pd(
+    info$Seff, "Theorem 2 efficient information"
+  )
+  # The B1/BM/BP formulas use the expected node-information blocks; keep
+  # those separate from the observed Hessian blocks used in Seff above.
+  bias <- calculate_bias_terms(U, Lambda, info$expected_blocks, config)
+
+  core <- (bias$B1L - bias$BML) -
+    info$SLU %*% info$PUU %*% info$projected_inv %*% info$PUU %*%
+    (bias$B1U - bias$BMU)
+
+  correction_likelihood <- as.vector(
+    Seff_inverse$inverse %*% core
+  )
+  penalty_direction <- info$DUG %*% crossprod(info$DUG, bias$BPU)
+  correction_penalty <- -as.vector(
+    SLL_inverse$inverse %*% info$SLU %*%
+      penalty_direction / n^2
+  )
+
+  list(
+    Seff = info$Seff,
+    lambda_v_hat = get_lambda_v(Lambda),
+    correction_likelihood = correction_likelihood,
+    correction_penalty = correction_penalty,
+    correction_total = correction_likelihood + correction_penalty,
+    max_abs_BM = max(abs(c(bias$BMU, bias$BML))),
+    DUG_gram_error_from_nI = info$DUG_gram_error_from_nI,
+    DUG_gram_condition_number = info$DUG_gram_condition_number,
+    PUU_idempotence_error = info$PUU_idempotence_error,
+    PUU_DUG_annihilation_error = info$PUU_DUG_annihilation_error,
+    SLL_min_eigenvalue = SLL_inverse$min_eigenvalue,
+    SLL_condition_number = SLL_inverse$condition_number,
+    SLL_inverse_residual = SLL_inverse$inverse_residual,
+    Seff_min_eigenvalue = Seff_inverse$min_eigenvalue,
+    Seff_condition_number = Seff_inverse$condition_number,
+    Seff_inverse_residual = Seff_inverse$inverse_residual
+  )
+}
+
+# --------------------- Monte Carlo replication ------------------
+
+# Define the K-dependent schema for standardized statistics and fit diagnostics.
+# raw_lambda_* and debiased_lambda_* store standardized errors, not estimates.
+result_column_names <- function(k) {
+  d <- k * (k + 1L) / 2L
+  names <- c(
+    paste0("stat_U_", seq_len(k)),
+    "chi_sq_U", "chi_sq_debiased_lambda",
+    "convergence_code", "n_iter", "scaled_gradient",
+    "projected_residual_U", "projected_residual_Lambda_v",
+    "projection_calls", "projection_max_row_ratio",
+    "projection_min_row_margin", "projection_max_gram_error",
+    "projection_max_objective_gap",
+    "final_objective", "alignment_min_singular_value",
+    "alignment_condition_number", "max_abs_BM",
+    "DUG_gram_error_from_nI", "DUG_gram_condition_number",
+    "PUU_idempotence_error", "PUU_DUG_annihilation_error",
+    "SLL_min_eigenvalue", "SLL_condition_number", "SLL_inverse_residual",
+    "Seff_min_eigenvalue", "Seff_condition_number", "Seff_inverse_residual"
+  )
+  for (i in seq_len(d)) {
+    names <- c(
+      names,
+      paste0("raw_lambda_", i),
+      paste0("debiased_lambda_", i),
+      paste0("lambda_raw_error_", i),
+      paste0("lambda_debiased_error_", i),
+      paste0("correction_likelihood_", i),
+      paste0("correction_penalty_", i)
+    )
+  }
+  names
+}
+
+# Create an NA result row with an explicit failure or nonconvergence code.
+failed_result <- function(k, code = 3L) {
+  out <- rep(NA_real_, length(result_column_names(k)))
+  names(out) <- result_column_names(k)
+  out["convergence_code"] <- code
+  out
+}
+
+# Simulate, fit, align, and standardize one network under the fixed latent truth.
+one_replication <- function(sim, truth, config) {
+  k <- config$k
+  pgd_diagnostic_names <- c(
+    "n_iter", "scaled_gradient",
+    "projected_residual_U", "projected_residual_Lambda_v",
+    "projection_calls", "projection_max_row_ratio",
+    "projection_min_row_margin", "projection_max_gram_error",
+    "projection_max_objective_gap", "final_objective"
+  )
+  tryCatch({
+    A <- generate_network_rep(
+      truth,
+      config,
+      config$replication_seed_base + sim
+    )
+    fit <- run_pgd_network(A, config)
+    if (fit$convergence_code != 0L) {
+      out <- failed_result(k, fit$convergence_code)
+      out[pgd_diagnostic_names] <- unlist(
+        fit[pgd_diagnostic_names], use.names = FALSE
+      )
+      return(out)
+    }
+
+    rot <- rotate_estimator(fit$U_hat, fit$Lambda_hat, truth$U_star)
+    node_info <- calculate_node_information(
+      rot$U_q, rot$Lambda_q, config$target_node, config, A = A
+    )
+    assert_positive_definite(node_info, "Theorem 1 node information")
+    z_U <- as.vector(
+      safe_sqrt_psd(node_info) %*%
+        (rot$U_q[config$target_node, ] - truth$U_star[config$target_node, ])
+    )
+
+    # Oracle theoretical convention: U_star remains the G3* anchor.
+    deb <- calculate_debiasing_components(
+      rot$U_q, rot$Lambda_q, truth$U_star, config, A = A
+    )
+    true_v <- get_lambda_v(truth$Lambda_star)
+    raw_v <- deb$lambda_v_hat
+    corrected_v <- raw_v + deb$correction_total
+    Seff_half <- safe_sqrt_psd(deb$Seff)
+    z_raw <- as.vector(Seff_half %*% (raw_v - true_v))
+    z_debiased <- as.vector(Seff_half %*% (corrected_v - true_v))
+
+    out <- setNames(
+      rep(NA_real_, length(result_column_names(k))),
+      result_column_names(k)
+    )
+    out[paste0("stat_U_", seq_along(z_U))] <- z_U
+    out[c(
+      "chi_sq_U", "chi_sq_debiased_lambda",
+      "convergence_code", "n_iter", "scaled_gradient",
+      "projected_residual_U", "projected_residual_Lambda_v",
+      "projection_calls", "projection_max_row_ratio",
+      "projection_min_row_margin", "projection_max_gram_error",
+      "projection_max_objective_gap",
+      "final_objective", "alignment_min_singular_value",
+      "alignment_condition_number", "max_abs_BM",
+      "DUG_gram_error_from_nI", "DUG_gram_condition_number",
+      "PUU_idempotence_error", "PUU_DUG_annihilation_error",
+      "SLL_min_eigenvalue", "SLL_condition_number", "SLL_inverse_residual",
+      "Seff_min_eigenvalue", "Seff_condition_number", "Seff_inverse_residual"
+    )] <- c(
+      sum(z_U^2), sum(z_debiased^2),
+      fit$convergence_code, fit$n_iter, fit$scaled_gradient,
+      fit$projected_residual_U, fit$projected_residual_Lambda_v,
+      fit$projection_calls, fit$projection_max_row_ratio,
+      fit$projection_min_row_margin, fit$projection_max_gram_error,
+      fit$projection_max_objective_gap,
+      fit$final_objective, rot$alignment_min_singular_value,
+      rot$alignment_condition_number, deb$max_abs_BM,
+      deb$DUG_gram_error_from_nI, deb$DUG_gram_condition_number,
+      deb$PUU_idempotence_error, deb$PUU_DUG_annihilation_error,
+      deb$SLL_min_eigenvalue, deb$SLL_condition_number,
+      deb$SLL_inverse_residual,
+      deb$Seff_min_eigenvalue, deb$Seff_condition_number,
+      deb$Seff_inverse_residual
+    )
+
+    for (i in seq_along(raw_v)) {
+      out[paste0("raw_lambda_", i)] <- z_raw[i]
+      out[paste0("debiased_lambda_", i)] <- z_debiased[i]
+      out[paste0("lambda_raw_error_", i)] <- raw_v[i] - true_v[i]
+      out[paste0("lambda_debiased_error_", i)] <- corrected_v[i] - true_v[i]
+      out[paste0("correction_likelihood_", i)] <-
+        deb$correction_likelihood[i]
+      out[paste0("correction_penalty_", i)] <-
+        deb$correction_penalty[i]
+    }
+    out
+  }, error = function(e) {
+    if (inherits(e, "active_U_row_bound")) {
+      # This event invalidates the exact-projection claim. Abort the full
+      # formal run rather than silently excluding the affected replication.
+      stop(e)
+    }
+    message("Replication ", sim, " failed: ", conditionMessage(e))
+    failed_result(k, 3L)
+  })
+}
+
+# Run conditional Monte Carlo replications with reproducible seeds and <= 7 workers.
+run_monte_carlo <- function(config, n_cores = NULL, truth = NULL) {
+  validate_model_config(config)
+  if (is.null(truth)) truth <- generate_truth(config)
+  required_truth_fields <- c(
+    "U_star", "Lambda_star", "Theta_star", "mean_star", "diagnostics"
+  )
+  expected_U_dimension <- c(config$n, config$k)
+  expected_Lambda_dimension <- c(config$k, config$k)
+  expected_network_dimension <- c(config$n, config$n)
+  if (!is.list(truth) ||
+      !all(required_truth_fields %in% names(truth)) ||
+      !identical(dim(truth$U_star), expected_U_dimension) ||
+      !identical(dim(truth$Lambda_star), expected_Lambda_dimension) ||
+      !identical(dim(truth$Theta_star), expected_network_dimension) ||
+      !identical(dim(truth$mean_star), expected_network_dimension) ||
+      !identical(truth$diagnostics$model, config$model) ||
+      !identical(as.integer(truth$diagnostics$n), config$n) ||
+      !identical(as.integer(truth$diagnostics$k), config$k) ||
+      !identical(truth$diagnostics$truth_design, config$truth_design) ||
+      !identical(
+        as.integer(truth$diagnostics$design_seed), config$design_seed
+      ) ||
+      any(!is.finite(c(
+        truth$U_star, truth$Lambda_star,
+        truth$Theta_star, truth$mean_star
+      ))) ||
+      max(abs(
+        truth$Lambda_star -
+          diag(config$lambda_vec, config$k, config$k)
+      )) > 1e-10) {
+    stop("The supplied truth is incompatible with config.")
+  }
+  reconstructed_theta <- truth$U_star %*% truth$Lambda_star %*%
+    t(truth$U_star)
+  diag(reconstructed_theta) <- 0
+  reconstructed_mean <- link_probability(reconstructed_theta, config)
+  diag(reconstructed_mean) <- 0
+  if (max(abs(truth$Theta_star - reconstructed_theta)) > 1e-8 ||
+      max(abs(truth$mean_star - reconstructed_mean)) > 1e-8) {
+    stop("The supplied truth matrices are internally inconsistent.")
+  }
+  print_truth_diagnostics(truth$diagnostics)
+  if (is.null(n_cores)) {
+    detected_cores <- suppressWarnings(parallel::detectCores())
+    if (length(detected_cores) != 1L || !is.finite(detected_cores)) {
+      detected_cores <- 1L
+    }
+    n_cores <- max(1L, as.integer(detected_cores) - 2L)
+  } else if (length(n_cores) != 1L || !is.finite(n_cores) ||
+             n_cores < 1L || n_cores != floor(n_cores)) {
+    stop("n_cores must be a positive integer.")
+  }
+  n_cores <- max(1L, min(7L, as.integer(n_cores), as.integer(config$n_sim)))
+
+  dense_dimension <- config$n * config$k
+  one_dense_matrix_gb <- 8 * dense_dimension^2 / 1024^3
+  estimated_dense_gb_per_worker <- 8 * one_dense_matrix_gb
+  estimated_dense_gb_all_workers <-
+    n_cores * estimated_dense_gb_per_worker
+  if (dense_dimension >= 1600L || estimated_dense_gb_all_workers >= 2) {
+    warning(
+      sprintf(
+        paste0(
+          "Theorem 2 uses several dense (n*k)-by-(n*k) matrices per ",
+          "worker (dimension %d). A rough lower-order estimate is %.3f GB ",
+          "per worker and %.3f GB across %d workers; matrix products and R ",
+          "copies require additional memory. Reduce n_cores or use separate ",
+          "CHTC jobs if needed."
+        ),
+        dense_dimension, estimated_dense_gb_per_worker,
+        estimated_dense_gb_all_workers, n_cores
+      ),
+      call. = FALSE,
+      immediate. = TRUE
+    )
+  }
+
+  cl <- NULL
+  if (n_cores == 1L) {
+    registerDoSEQ()
+  } else {
+    cl <- makeCluster(n_cores)
+    registerDoParallel(cl)
+    on.exit(try(stopCluster(cl), silent = TRUE), add = TRUE)
+  }
+
+  export_names <- c(
+    "normalize_model_name", "validate_model_config",
+    "set_reproducible_seed", "symmetrize", "sigmoid", "stable_log1pexp",
+    "safe_pinv_psd", "safe_sqrt_psd", "assert_positive_definite",
+    "ordinary_inverse_pd",
+    "get_lambda_v",
+    "lambda_direction_derivative", "project_C_U_certified",
+    "proximal_projection_Lambda", "projected_gradient_mapping_components",
+    "probit_ratios",
+    "observed_information_matrix",
+    "link_probability", "link_inverse", "negative_loglikelihood_edges",
+    "negative_score_matrix", "expected_derivative_terms",
+    "generate_network_rep", "spectral_keep_indices",
+    "initialize_spectral", "calculate_objective_network",
+    "calculate_gradient_network", "run_pgd_network",
+    "rotate_estimator", "calculate_node_information",
+    "build_D_UG", "build_information_blocks", "calculate_bias_terms",
+    "calculate_debiasing_components", "result_column_names",
+    "failed_result", "one_replication"
+  )
+
+  cat(sprintf(
+    paste0(
+      "Running %s: n=%d, k=%d, reps=%d, cores=%d, ",
+      "lr=%g, max_iter=%d, tol=%g\n"
+    ),
+    config$model, config$n, config$k, config$n_sim, n_cores,
+    config$learning_rate, config$max_iter, config$tolerance
+  ))
+
+  results <- foreach(
+    sim = seq_len(config$n_sim),
+    .combine = "rbind",
+    .errorhandling = "stop",
+    .export = export_names
+  ) %dopar% one_replication(sim, truth, config)
+
+  if (is.null(dim(results))) {
+    result_names <- names(results)
+    results <- matrix(
+      as.numeric(results), nrow = 1L,
+      dimnames = list(NULL, result_names)
+    )
+  } else {
+    results <- as.matrix(results)
+  }
+  expected_names <- result_column_names(config$k)
+  if (!identical(colnames(results), expected_names)) {
+    stop("Internal result-column mismatch across replications.")
+  }
+  attr(results, "truth") <- truth
+  attr(results, "config") <- config
+  attr(results, "settings") <- list(
+    config = config,
+    truth_diagnostics = truth$diagnostics,
+    convergence_metric = paste0(
+      "max(||Delta_U||_max/(learning_rate/n), ",
+      "||Delta_lambda_v||_inf/(learning_rate/(2*n^2)))"
+    ),
+    U_projection = paste0(
+      "certified scaled-polar projection onto C_U; abort if the ",
+      "M_bound_U row constraint is active"
+    ),
+    nuisance_projector = paste0(
+      "P_UU = I - D_UG (D_GU D_UG)^+ D_GU; do not replace ",
+      "the finite-sample D_GU D_UG by n I"
+    ),
+    penalty_DUG = "use the same theoretical D_UG D_GU product / n^2",
+    memory_estimate = list(
+      dense_dimension = dense_dimension,
+      one_dense_matrix_gb = one_dense_matrix_gb,
+      estimated_dense_gb_per_worker = estimated_dense_gb_per_worker,
+      estimated_dense_gb_all_workers = estimated_dense_gb_all_workers
+    ),
+    rng_kind = c(
+      kind = "Mersenne-Twister",
+      normal.kind = "Inversion",
+      sample.kind = "Rejection"
+    ),
+    n_cores = n_cores
+  )
+  cat("Finished.\n")
+  results
+}
+
+# ---------------------- Summaries and plots ---------------------
+
+# Exclude non-finite values before computing summaries or plotting quantiles.
+finite_values <- function(x) x[is.finite(x)]
+
+# Select all rows or only replications marked as successfully converged.
+inference_rows <- function(results, converged_only = TRUE) {
+  if (!converged_only) return(seq_len(nrow(results)))
+  which(results[, "convergence_code"] == 0)
+}
+
+# Compare a standardized component to N(0,1), labeling its empirical mean and SD.
+qqplot_standard_normal <- function(x, main, col = "darkblue") {
+  x <- finite_values(x)
+  if (length(x) < 2L) {
+    plot.new()
+    title(main = paste0(main, "\nInsufficient finite values"))
+    return(invisible(NULL))
+  }
+  qqnorm(
+    x,
+    main = sprintf("%s\nmean=%.4f, sd=%.4f", main, mean(x), sd(x)),
+    pch = 20,
+    col = col
+  )
+  abline(0, 1, col = "red", lwd = 2)
+  invisible(NULL)
+}
+
+# Compare squared-norm statistics to their specified chi-square reference law.
+qqplot_chisq <- function(x, df, main) {
+  x <- sort(finite_values(x))
+  if (length(x) < 2L) {
+    plot.new()
+    title(main = paste0(main, "\nInsufficient finite values"))
+    return(invisible(NULL))
+  }
+  plot(
+    qchisq(ppoints(length(x)), df), x,
+    pch = 20, col = "darkgreen", main = main,
+    xlab = "Theoretical quantiles", ylab = "Empirical quantiles"
+  )
+  abline(0, 1, col = "red", lwd = 2)
+  invisible(NULL)
+}
+
+# Plot separate component QQ comparisons and the joint chi-square diagnostics.
+plot_results <- function(results, config, converged_only = TRUE) {
+  rows <- inference_rows(results, converged_only)
+  if (!length(rows)) stop("No converged replications available for plotting.")
+  x <- results[rows, , drop = FALSE]
+  k <- config$k
+  d <- k * (k + 1L) / 2L
+  old <- par(mfrow = c(1, 2), ask = FALSE)
+  on.exit(par(old), add = TRUE)
+
+  for (i in seq_len(k)) {
+    qqplot_standard_normal(
+      x[, paste0("stat_U_", i)],
+      paste0(config$model, ": node U coordinate ", i),
+      "darkblue"
+    )
+  }
+  qqplot_chisq(x[, "chi_sq_U"], k, paste0("Node U chi-square, df=", k))
+  for (i in seq_len(d)) {
+    qqplot_standard_normal(
+      x[, paste0("raw_lambda_", i)],
+      paste0("Raw Lambda coordinate ", i),
+      "gray50"
+    )
+    qqplot_standard_normal(
+      x[, paste0("debiased_lambda_", i)],
+      paste0("Debiased Lambda coordinate ", i),
+      "darkgreen"
+    )
+  }
+  qqplot_chisq(
+    x[, "chi_sq_debiased_lambda"], d,
+    paste0("Debiased Lambda chi-square, df=", d)
+  )
+  invisible(NULL)
+}
+
+# Report convergence, numerical diagnostics, component moments, and joint coverage.
+print_simulation_summary <- function(results, config) {
+  k <- config$k
+  d <- k * (k + 1L) / 2L
+  code_labels <- c(
+    `0` = "converged", `1` = "maximum_iterations",
+    `2` = "non_finite", `3` = "error"
+  )
+  cat("\n================ Simulation Summary ================\n")
+  cat("Model:", config$model, "\n")
+  cat("Learning rate:", config$learning_rate,
+      " Max iterations:", config$max_iter,
+      " Tolerance:", config$tolerance, "\n")
+  cat(paste0(
+    "Convergence metric: max(||Delta_U||_max/(learning_rate/n), ",
+    "||Delta_lambda_v||_inf/(learning_rate/(2*n^2)))\n"
+  ))
+  cat("\nConvergence:\n")
+  print(table(code_labels[as.character(results[, "convergence_code"])],
+              useNA = "ifany"))
+
+  finite_projection_rows <- which(is.finite(results[, "projection_calls"]))
+  if (length(finite_projection_rows)) {
+    projection_results <- results[finite_projection_rows, , drop = FALSE]
+    cat(sprintf(
+      paste0(
+        "Certified C_U projection diagnostics: max row ratio=%.6f; ",
+        "minimum row margin=%.4e; max Gram error=%.4e; ",
+        "max polar objective gap=%.4e\n"
+      ),
+      max(projection_results[, "projection_max_row_ratio"]),
+      min(projection_results[, "projection_min_row_margin"]),
+      max(projection_results[, "projection_max_gram_error"]),
+      max(projection_results[, "projection_max_objective_gap"])
+    ))
+  }
+
+  rows <- inference_rows(results, converged_only = TRUE)
+  cat("Converged replications used for inference:", length(rows), "\n")
+  if (!length(rows)) return(invisible(NULL))
+  x <- results[rows, , drop = FALSE]
+
+  cat(sprintf(
+    paste0(
+      "D_UG/P_UU diagnostics: median Gram error from nI=%.4e; ",
+      "maximum Gram condition number=%.4e; maximum P_UU idempotence ",
+      "error=%.4e; maximum P_UU D_UG error=%.4e\n"
+    ),
+    median(x[, "DUG_gram_error_from_nI"], na.rm = TRUE),
+    max(x[, "DUG_gram_condition_number"], na.rm = TRUE),
+    max(x[, "PUU_idempotence_error"], na.rm = TRUE),
+    max(x[, "PUU_DUG_annihilation_error"], na.rm = TRUE)
+  ))
+
+  cat("\nNode U standardized statistics:\n")
+  for (i in seq_len(k)) {
+    z <- finite_values(x[, paste0("stat_U_", i)])
+    cat(sprintf(" U%d: mean=%.4f, sd=%.4f\n", i, mean(z), sd(z)))
+  }
+  cat("\nLambda standardized statistics:\n")
+  for (i in seq_len(d)) {
+    z <- finite_values(x[, paste0("debiased_lambda_", i)])
+    cat(sprintf(" Lambda %d: mean=%.4f, sd=%.4f\n", i, mean(z), sd(z)))
+  }
+  cat(sprintf(
+    "\nNode chi-square: mean=%.4f, 95%% coverage=%.4f\n",
+    mean(x[, "chi_sq_U"], na.rm = TRUE),
+    mean(x[, "chi_sq_U"] <= qchisq(0.95, k), na.rm = TRUE)
+  ))
+  cat(sprintf(
+    "Lambda chi-square: mean=%.4f, 95%% coverage=%.4f\n",
+    mean(x[, "chi_sq_debiased_lambda"], na.rm = TRUE),
+    mean(
+      x[, "chi_sq_debiased_lambda"] <= qchisq(0.95, d),
+      na.rm = TRUE
+    )
+  ))
+  cat(sprintf(
+    paste0(
+      "Alignment: min singular value median=%.4f; ",
+      "condition number median=%.4f\n"
+    ),
+    median(x[, "alignment_min_singular_value"], na.rm = TRUE),
+    median(x[, "alignment_condition_number"], na.rm = TRUE)
+  ))
+  cat(sprintf(
+    "max_abs_BM: median=%.4g, maximum=%.4g%s\n",
+    median(x[, "max_abs_BM"], na.rm = TRUE),
+    max(x[, "max_abs_BM"], na.rm = TRUE),
+    if (config$model == "bernoulli_probit") {
+      " (generally nonzero for probit)"
+    } else ""
+  ))
+  cat("====================================================\n")
+  invisible(NULL)
+}
+
+# Encode one finite numeric setting as a compact filename-safe tag.
+number_tag <- function(x) {
+  if (length(x) != 1L || !is.finite(x)) {
+    stop("number_tag requires one finite number.")
+  }
+  tag <- sprintf("%.8g", as.numeric(x))
+  tag <- gsub("-", "m", tag, fixed = TRUE)
+  tag <- gsub("+", "", tag, fixed = TRUE)
+  gsub(".", "p", tag, fixed = TRUE)
+}
+
+# Label a numeric vector with readable values plus a digest of its RDS encoding.
+numeric_vector_tag <- function(x, readable_limit = 6L) {
+  x <- as.numeric(x)
+  if (!length(x) || any(!is.finite(x))) {
+    stop("numeric_vector_tag requires a nonempty finite numeric vector.")
+  }
+  temporary_path <- tempfile("gfm_numeric_vector_", fileext = ".rds")
+  on.exit(unlink(temporary_path), add = TRUE)
+  saveRDS(x, temporary_path, version = 2)
+  hash <- substr(unname(tools::md5sum(temporary_path)), 1L, 12L)
+  readable <- if (length(x) <= readable_limit) {
+    paste(vapply(x, number_tag, character(1L)), collapse = "_")
+  } else {
+    paste0("length", length(x))
+  }
+  paste0(readable, "_h", hash)
+}
+
+# Save results, truth, configuration, execution settings, and available QQ plots.
+save_outputs <- function(results, config, output_dir) {
+  dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+  lambda_tag <- numeric_vector_tag(config$lambda_vec)
+  prefix <- paste0(
+    config$output_prefix,
+    "_ball_rejection_no_centering",
+    "_n", config$n,
+    "_k", config$k,
+    "_lambda_", lambda_tag,
+    "_R", config$n_sim,
+    "_target", config$target_node,
+    "_dseed", config$design_seed,
+    "_rseed", config$replication_seed_base,
+    "_sig", number_tag(config$sigma),
+    "_lr", number_tag(config$learning_rate),
+    "_iter", config$max_iter,
+    "_tol", number_tag(config$tolerance),
+    "_MU", number_tag(config$M_bound_U),
+    "_ML", number_tag(config$M_bound_Lambda),
+    "_peps", number_tag(config$probability_eps),
+    "_weps", number_tag(config$whitening_eigen_floor)
+  )
+  csv_path <- file.path(output_dir, paste0(prefix, "_results.csv"))
+  rds_path <- file.path(output_dir, paste0(prefix, "_complete.rds"))
+  truth_path <- file.path(output_dir, paste0(prefix, "_truth.rds"))
+  config_path <- file.path(output_dir, paste0(prefix, "_config.rds"))
+  settings_path <- file.path(output_dir, paste0(prefix, "_settings.rds"))
+  plot_path <- file.path(output_dir, paste0(prefix, "_qqplots.pdf"))
+
+  write.csv(as.data.frame(results), csv_path, row.names = FALSE)
+  saveRDS(results, rds_path)
+  saveRDS(attr(results, "truth"), truth_path)
+  saveRDS(config, config_path)
+  saveRDS(attr(results, "settings"), settings_path)
+
+  converged <- inference_rows(results, converged_only = TRUE)
+  if (length(converged)) {
+    pdf(plot_path, width = 11, height = 7)
+    plot_results(results, config, converged_only = TRUE)
+    dev.off()
+  } else {
+    # Do not leave a same-configuration PDF from an earlier run in place.
+    if (file.exists(plot_path)) file.remove(plot_path)
+    warning("No QQ plot written because no replication converged.")
+    plot_path <- NA_character_
+  }
+
+  cat("Outputs saved in:", normalizePath(output_dir), "\n")
+  invisible(list(
+    csv = csv_path, rds = rds_path, truth = truth_path,
+    config = config_path, settings = settings_path, plots = plot_path
+  ))
+}
+
+# ----------------------- Model selection ------------------------
+
+# Change params$model in the YAML header, or render with, e.g.:
+# rmarkdown::render(
+#   "node_inference.Rmd", # Run this example from the code/ directory.
+#   params = list(
+#     model = "poisson", n = 300, n_sim = 100, k = 3, target_node = 1,
+#     lambda_values = "0.30, 0.25, 0.20",
+#     run_simulation = TRUE
+#   )
+# )
+
+requested_key <- tolower(gsub("[- ]", "_", runtime_params$model))
+selected_models <- if (requested_key %in% c("all", "all_models")) {
+  c("gaussian", "poisson", "bernoulli_logit", "bernoulli_probit")
+} else {
+  normalize_model_name(runtime_params$model)
+}
+
+# Translate non-NULL render parameters into validated model-configuration inputs.
+make_param_overrides <- function(base_config, params) {
+  overrides <- list()
+  latent <- resolve_latent_parameters(
+    base_config = base_config,
+    k_value = params$k,
+    lambda_values = params$lambda_values
+  )
+  overrides$k <- latent$k
+  overrides$lambda_vec <- latent$lambda_vec
+  if (!is.null(params$n)) overrides$n <- as.numeric(params$n)
+  if (!is.null(params$n_sim)) overrides$n_sim <- as.numeric(params$n_sim)
+  if (!is.null(params$design_seed)) {
+    overrides$design_seed <- as.numeric(params$design_seed)
+  }
+  if (!is.null(params$replication_seed_base)) {
+    overrides$replication_seed_base <-
+      as.numeric(params$replication_seed_base)
+  }
+  if (!is.null(params$target_node)) {
+    overrides$target_node <- as.numeric(params$target_node)
+  }
+  if (!is.null(params$sigma)) overrides$sigma <- as.numeric(params$sigma)
+  if (!is.null(params$learning_rate)) {
+    overrides$learning_rate <- as.numeric(params$learning_rate)
+  }
+  if (!is.null(params$max_iter)) {
+    overrides$max_iter <- as.numeric(params$max_iter)
+  }
+  if (!is.null(params$tolerance)) {
+    overrides$tolerance <- as.numeric(params$tolerance)
+  }
+  if (!is.null(params$M_bound_U)) {
+    overrides$M_bound_U <- as.numeric(params$M_bound_U)
+  }
+  if (!is.null(params$M_bound_Lambda)) {
+    overrides$M_bound_Lambda <- as.numeric(params$M_bound_Lambda)
+  }
+  if (!is.null(params$probability_eps)) {
+    overrides$probability_eps <- as.numeric(params$probability_eps)
+  }
+  if (!is.null(params$probability_floor)) {
+    overrides$probability_floor <- as.numeric(params$probability_floor)
+  }
+  if (!is.null(params$curvature_floor)) {
+    overrides$curvature_floor <- as.numeric(params$curvature_floor)
+  }
+  if (!is.null(params$node_information_floor)) {
+    overrides$node_information_floor <-
+      as.numeric(params$node_information_floor)
+  }
+  if (!is.null(params$whitening_eigen_floor)) {
+    overrides$whitening_eigen_floor <-
+      as.numeric(params$whitening_eigen_floor)
+  }
+  if (!is.null(params$truth_check_action)) {
+    overrides$truth_check_action <- as.character(params$truth_check_action)
+  }
+  overrides
+}
+
+requested_cores <- if (is.null(runtime_params$n_cores)) {
+  NULL
+} else {
+  as.numeric(runtime_params$n_cores)
+}
+if (!is.null(requested_cores) &&
+    (length(requested_cores) != 1L || !is.finite(requested_cores) ||
+     requested_cores < 1L || requested_cores != floor(requested_cores))) {
+  stop("n_cores must be a positive integer.")
+}
+if (!is.null(requested_cores)) requested_cores <- as.integer(requested_cores)
+
+root_output_dir <- runtime_params$output_dir
+if (is.null(root_output_dir)) {
+  root_output_dir <- "../data/node1/new_run"
+} else if (length(root_output_dir) != 1L ||
+           !is.character(root_output_dir) || !nzchar(root_output_dir)) {
+  stop("output_dir must be NULL or one nonempty character string.")
+}
+
+results_by_model <- list()
+truth_by_model <- list()
+output_files_by_model <- list()
+
+# Build and check every requested truth before starting any expensive model.
+# This prevents model="all" from completing several simulations before a
+# later model reports an invalid probability/curvature range.
+configs_by_model <- setNames(lapply(selected_models, function(selected_model) {
+  base_config <- default_model_configs()[[selected_model]]
+  overrides <- make_param_overrides(base_config, runtime_params)
+  get_model_config(selected_model, overrides)
+}), selected_models)
+
+preflight_truths <- lapply(configs_by_model, generate_truth)
+if (length(preflight_truths) > 1L) {
+  reference_U <- preflight_truths[[1L]]$U_star
+  maximum_common_U_difference <- max(vapply(
+    preflight_truths[-1L],
+    function(truth) {
+      if (!identical(dim(truth$U_star), dim(reference_U))) return(Inf)
+      max(abs(truth$U_star - reference_U))
+    },
+    numeric(1L)
+  ))
+  if (!is.finite(maximum_common_U_difference) ||
+      maximum_common_U_difference > 1e-12) {
+    stop("The requested models did not receive the same fixed U_star.")
+  }
+  cat(sprintf(
+    "\nCommon-U preflight passed across %d models (max difference %.3e).\n",
+    length(preflight_truths), maximum_common_U_difference
+  ))
+}
+
+for (selected_model in selected_models) {
+  config <- configs_by_model[[selected_model]]
+  truth <- preflight_truths[[selected_model]]
+
+  cat("\nSelected model:", config$model, "\n")
+  cat(
+    "n:", config$n, " k:", config$k,
+    " Monte Carlo replications:", config$n_sim, "\n"
+  )
+  cat("Lambda diagonal:", paste(config$lambda_vec, collapse = ", "), "\n")
+  cat("Learning rate:", config$learning_rate,
+      " Maximum iterations:", config$max_iter,
+      " Tolerance:", config$tolerance, "\n")
+
+  if (isTRUE(runtime_params$run_simulation)) {
+    results <- run_monte_carlo(
+      config, n_cores = requested_cores, truth = truth
+    )
+    print_simulation_summary(results, config)
+    model_output_dir <- if (length(selected_models) > 1L) {
+      file.path(root_output_dir, sub("^bernoulli_", "", config$model))
+    } else {
+      root_output_dir
+    }
+    output_files <- save_outputs(results, config, model_output_dir)
+    results_by_model[[config$model]] <- results
+    truth_by_model[[config$model]] <- attr(results, "truth")
+    output_files_by_model[[config$model]] <- output_files
+  } else {
+    print_truth_diagnostics(truth$diagnostics)
+    truth_by_model[[config$model]] <- truth
+  }
+}
+```
