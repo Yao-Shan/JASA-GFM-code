@@ -3,7 +3,7 @@ GFM estimation for one observed network
 
 This directory provides functions for fitting the symmetric generalized factor
 model to an existing dataset and obtaining a bias-corrected Lambda estimate.
-The original simulation Rmd files remain unchanged. This interface does not
+The original simulation algorithms and settings are preserved. This interface does not
 generate data, repeat a Monte Carlo experiment, choose a seed, or write files.
 It uses base R; no package installation is required.
 

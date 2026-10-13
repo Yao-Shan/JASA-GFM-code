@@ -2,7 +2,7 @@
 # Public interface: gfm_read_matrix(), gfm_fit(), gfm_predict().
 # See practitioner/README.txt for input conventions and interpretation.
 # Core formulas extracted from code/node_inference.Rmd on 2026-10-12.
-# Original simulation files are unchanged. Sourcing only defines functions.
+# Original simulation algorithms are preserved. Sourcing only defines functions.
 # The plug-in correction uses U_anchor = U_hat in the fitted coordinate frame.
 # Practical additions: validated inputs, explicit failures, resource guard,
 # and rank checks before accepting the correction. Defaults/formulas match
