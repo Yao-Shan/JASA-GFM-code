@@ -39,8 +39,13 @@ vignettes/*.pdf
 # R Environment Variables
 .Renviron
 
-# pkgdown site
-docs/
+# Project data and generated simulation output
+/data/
+/simulations/*.html
+/simulations/*.pdf
+
+# macOS metadata
+.DS_Store
 
 # translation temp files
 po/*~
