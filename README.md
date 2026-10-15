@@ -102,7 +102,7 @@ it does not start simulations. The estimation suite requires only base R.
 
 Open `simulations/node_inference.Rmd` in RStudio to reproduce or adapt the simulation
 workflow. It uses `rmarkdown`, `knitr`, `doParallel`, and `foreach`, which are
-not required by the practitioner interface or the test suite.
+not required by the practitioner interface or the estimation test suite.
 
 The defaults retain the paper's main setting: all four models, `n = 1000`,
 1,000 network replications, node 1, Lambda diagonal `(0.5, 0.5)`, and up to seven
@@ -120,6 +120,15 @@ To redraw existing results without fitting models:
 ```r
 rmarkdown::render("plots/plot_figures.Rmd")
 ```
+
+Both notebooks default to HTML and also support **Knit to PDF** or
+`output_format = "pdf_document"`. PDF rendering requires XeLaTeX and retains
+the generated `.tex` source. PDF reports hide code; HTML reports offer
+collapsible code. The plotting report embeds vector PDF figures, and separate
+PDF/PNG figure exports remain available. Choosing another format reruns the
+notebook with its current parameters; see the
+[report-format examples](docs/simulation_guide.md#choose-html-or-pdf) for a
+simulation truth-check PDF and a PDF made from existing results.
 
 The plotting notebook reads native result CSVs and their matching configuration
 RDS files from `data/node1` by default. It writes open-circle QQ plots and

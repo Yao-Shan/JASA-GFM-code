@@ -2,7 +2,17 @@
 title: "Nodewise Inference for Symmetric Generalized Factor Models"
 author: "lsy"
 date: "`r Sys.Date()`"
-output: html_document
+output:
+  html_document:
+    toc: true
+    code_folding: hide
+  pdf_document:
+    toc: true
+    keep_tex: true
+    latex_engine: xelatex
+    fig_crop: false
+fontsize: 10pt
+geometry: margin=1in
 params:
   # Observation model; use "all" to run the four models sequentially.
   model: "all"
@@ -34,7 +44,34 @@ params:
   output_dir: null
 ---
 
+```{r report-format, include=FALSE}
+# Wrap long console lines in PDF without changing calculations or saved files.
+if (knitr::is_latex_output()) {
+  original_output_hook <- knitr::knit_hooks$get("output")
+  knitr::knit_hooks$set(output = function(x, options) {
+    lines <- strsplit(x, "\n", fixed = TRUE)[[1L]]
+    wrapped <- unlist(lapply(lines, function(line) {
+      pieces <- character()
+      while (nchar(line) > 80L) {
+        spaces <- gregexpr(" ", substr(line, 1L, 76L), fixed = TRUE)[[1L]]
+        cut <- if (any(spaces > 8L)) max(spaces) else 76L
+        pieces <- c(pieces, substr(line, 1L, cut))
+        line <- paste0("    ", substr(line, cut + 1L, nchar(line)))
+      }
+      c(pieces, line)
+    }), use.names = FALSE)
+    original_output_hook(paste0(paste(wrapped, collapse = "\n"), "\n"), options)
+  })
+}
+```
+
 ## Purpose and configuration
+
+HTML is the default report. Choose **Knit to PDF** from the Knit menu for a
+PDF report and its intermediate `.tex` file; PDF rendering requires XeLaTeX.
+Code can be expanded in HTML and is omitted from the PDF report. Both formats
+execute the same experiment according to `run_simulation`; to redraw existing
+results without repeating the simulations, use `plots/plot_figures.Rmd`.
 
 This notebook simulates symmetric networks and evaluates Theorem 1 at one
 selected node and Theorem 2 for the global symmetric parameter $\Lambda$.
@@ -128,7 +165,7 @@ replications. The output also includes the complete R object, truth,
 configuration, execution settings, and a QQ-plot PDF when plotting is possible.
 Retain the configuration alongside a CSV when sharing or replotting results.
 
-```{r, message=FALSE, warning=FALSE}
+```{r, echo=knitr::is_html_output(), message=FALSE, warning=FALSE}
 # Symmetric latent-factor network simulation with configurable dimension k.
 # Raw rows z_i are iid uniform in the unit k-ball. Uncentered whitening gives
 # U_star^T U_star = n I_k, couples the rows, and does not impose zero means.

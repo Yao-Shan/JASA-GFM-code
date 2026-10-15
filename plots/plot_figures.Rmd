@@ -6,6 +6,15 @@ output:
     toc_depth: 2
     code_folding: hide
     self_contained: true
+  pdf_document:
+    toc: true
+    toc_depth: 2
+    keep_tex: true
+    latex_engine: xelatex
+    fig_crop: false
+header-includes:
+  - \usepackage{longtable}
+  - \usepackage{booktabs}
 params:
   data_dir: "../data/node1"
   output_dir: "../data/figures"
@@ -17,7 +26,10 @@ params:
 
 This document reads existing simulation results. It does not simulate networks,
 fit models, or repeat Monte Carlo experiments. Open it in RStudio and **Knit to
-HTML**. Plotting uses base R; knitting also requires `rmarkdown` and `knitr`.
+HTML** (the default), or choose **Knit to PDF** from the Knit menu. Plotting
+uses base R; knitting requires `rmarkdown` and `knitr`, and PDF output also needs
+a LaTeX installation providing XeLaTeX. The PDF report hides source code and
+embeds vector PDF figures. The HTML report retains expandable code and PNG previews.
 Paths are relative to this document, in the repository's `plots` directory.
 
 Put the native `*_results.csv` and matching `*_config.rds` files under `data_dir`.
@@ -46,8 +58,40 @@ standardized component and joint statistic is finite. The same retained rows
 are used for all nodewise plots of that case. The tables below disclose exclusions;
 they can affect how the diagnostic plots should be interpreted.
 
-```{r setup}
-knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = TRUE)
+```{r setup, echo=knitr::is_html_output(), results='asis'}
+knitr::opts_chunk$set(echo = knitr::is_html_output(), message = FALSE, warning = TRUE)
+
+# HTML keeps full tables; PDF uses compact tables that can continue across pages.
+report_table <- function(d, caption = NULL, align = NULL, new_page = FALSE) {
+  cat("\n\n")
+  if (knitr::is_latex_output()) {
+    if (new_page && nrow(d) > 12L) cat("\\clearpage\n")
+    table_text <- as.character(knitr::kable(
+      d, format = "latex", longtable = TRUE, booktabs = TRUE,
+      row.names = FALSE, caption = caption, align = align, escape = TRUE,
+      label = if (is.null(caption)) NA else paste0("plot-", gsub("[^a-z0-9]+", "-", tolower(caption)))))
+    # Retain column headings if a larger collection spans several pages.
+    heading <- strsplit(strsplit(table_text, "\\toprule\n", fixed = TRUE)[[1]][2],
+                        "\\midrule\n", fixed = TRUE)[[1]][1]
+    table_text <- sub("\\midrule\n", paste0("\\midrule\n\\endfirsthead\n\\toprule\n",
+                       heading, "\\midrule\n\\endhead\n"), table_text, fixed = TRUE)
+    cat(table_text)
+  } else {
+    print(knitr::kable(d, row.names = FALSE, caption = caption))
+  }
+  cat("\n\n")
+}
+# Escape caption text once, character by character, including literal underscores.
+latex_escape <- function(x) {
+  replacements <- c("\\" = "\\textbackslash{}", "{" = "\\{", "}" = "\\}",
+                    "$" = "\\$", "&" = "\\&", "%" = "\\%", "#" = "\\#",
+                    "_" = "\\_", "~" = "\\textasciitilde{}", "^" = "\\textasciicircum{}")
+  vapply(strsplit(as.character(x), "", fixed = TRUE), function(chars) {
+    matched <- match(chars, names(replacements))
+    chars[!is.na(matched)] <- replacements[matched[!is.na(matched)]]
+    paste0(chars, collapse = "")
+  }, character(1))
+}
 data_dir <- params$data_dir
 figure_dir <- params$output_dir
 dir.create(figure_dir, recursive = TRUE, showWarnings = FALSE)
@@ -163,7 +207,22 @@ input_table <- do.call(rbind, lapply(cases, function(x) data.frame(
 row_selection <- do.call(rbind, lapply(cases, function(x) cbind(csv = x$path, x$selection)))
 write.csv(input_table, file.path(figure_dir, "plot_inputs.csv"), row.names = FALSE)
 write.csv(row_selection, file.path(figure_dir, "row_selection.csv"), row.names = FALSE)
-knitr::kable(input_table[setdiff(names(input_table), "csv")], row.names = FALSE)
+if (knitr::is_latex_output()) {
+  case_ids <- sprintf("C%02d", seq_len(nrow(input_table)))
+  common <- cases[[1]]$config
+  cat(sprintf("All cases use design seed **%s**, replication seed base **%s**, and target node **%s**.\n\n",
+              common$design_seed, common$replication_seed_base, common$target_node))
+  cat("Case IDs follow the row order in `plot_inputs.csv`; full metadata and file paths remain in that CSV.\n\n")
+  metadata <- data.frame(Case = case_ids, Model = unname(model_names[input_table$model]),
+                         n = input_table$n, K = input_table$K,
+                         Lambda = vapply(cases, function(x) sub("^Lambda = ", "", lambda_label(x$config$lambda_vec)), character(1)))
+  report_table(metadata, "Simulation cases", align = c("l", "l", "r", "r", "p{0.32\\linewidth}"), new_page = TRUE)
+  counts <- input_table[c("planned", "attempted", "converged", "used", "excluded")]
+  names(counts) <- c("Planned", "Attempted", "Converged", "Used", "Excluded")
+  report_table(cbind(Case = case_ids, counts), "Replication counts", new_page = TRUE)
+} else {
+  report_table(input_table[setdiff(names(input_table), "csv")])
+}
 if (any(input_table$excluded > 0L)) warning("Some replications were excluded. See the table and row_selection.csv; plots describe the retained replications.")
 if (any(input_table$planned != input_table$attempted)) warning("Saved row counts differ from planned repetitions for some cases. See plot_inputs.csv.")
 ```
@@ -257,7 +316,7 @@ qq_panel <- function(g, row, column, case, limits, columns, df = NULL, colors = 
   }
 }
 
-# Save the same deterministic drawing to PDF and PNG, and include its PNG in HTML.
+# Save the same drawing twice. PDF reports embed the vector file on its own page.
 figure_manifest <- list()
 save_figure <- function(name, caption, draw, nr, nc, height = NULL, width = NULL) {
   if (is.null(width)) width <- max(4.0, 1.02 + 1.65 * nc + 0.43 * (nc - 1L))
@@ -270,7 +329,14 @@ save_figure <- function(name, caption, draw, nr, nc, height = NULL, width = NULL
   tryCatch(draw(), finally = dev.off())
   figure_manifest[[length(figure_manifest) + 1L]] <<- data.frame(
     figure = name, description = caption, pdf = basename(pdf_file), png = basename(png_file))
-  cat("\n\n![", caption, "](<", normalizePath(png_file), ">)\n\n", sep = "")
+  if (knitr::is_latex_output()) {
+    cat("\n\n\\clearpage\n\\begin{figure}[p]\n\\centering\n",
+        "\\includegraphics[width=\\linewidth,height=0.78\\textheight,keepaspectratio]{\\detokenize{",
+        normalizePath(pdf_file, winslash = "/"), "}}\n",
+        "\\caption{", latex_escape(caption), "}\n\\end{figure}\n\\clearpage\n\n", sep = "")
+  } else {
+    cat("\n\n![", caption, "](<", normalizePath(png_file), ">)\n\n", sep = "")
+  }
 }
 groups <- split(cases, vapply(cases, function(x) group_key(x$config), character(1)))
 ```
@@ -429,7 +495,21 @@ if (is.null(params$all_nodes_file)) {
     nodes = length(unique(x$data$node)), min_valid = min(x$data$valid_reps),
     max_valid = max(x$data$valid_reps), max_invalid = max(x$data$invalid_reps), csv = x$path)))
   write.csv(all_node_log, file.path(figure_dir, "all_node_inputs.csv"), row.names = FALSE)
-  print(knitr::kable(all_node_log[setdiff(names(all_node_log), "csv")], row.names = FALSE))
+  if (knitr::is_latex_output()) {
+    ids <- sprintf("A%02d", seq_len(nrow(all_node_log)))
+    cat("All-node case IDs follow the row order in `all_node_inputs.csv`. Each summary passed the complete-replication check.\n\n")
+    metadata <- data.frame(Case = ids, Model = unname(model_names[all_node_log$model]),
+                           n = all_node_log$n, K = all_node_log$K,
+                           Lambda = vapply(node_inputs, function(x) sub("^Lambda = ", "", lambda_label(x$config$lambda_vec)), character(1)))
+    report_table(metadata, "All-node cases", align = c("l", "l", "r", "r", "p{0.32\\linewidth}"), new_page = TRUE)
+    counts <- data.frame(Case = ids, Nodes = all_node_log$nodes,
+                         `Min. valid` = all_node_log$min_valid,
+                         `Max. valid` = all_node_log$max_valid,
+                         `Max. invalid` = all_node_log$max_invalid, check.names = FALSE)
+    report_table(counts, "All-node replication counts", new_page = TRUE)
+  } else {
+    report_table(all_node_log[setdiff(names(all_node_log), "csv")])
+  }
 }
 ```
 
@@ -519,17 +599,25 @@ if (!is.null(all_nodes)) {
 ## 5. Output files
 
 Each displayed figure is saved as PDF and PNG in `output_dir`. The HTML embeds
-the PNG images. `figure_manifest.csv` maps filenames to their settings;
+PNG previews; the PDF report embeds the vector PDF files, with one figure per page.
+`figure_manifest.csv` maps filenames to their settings;
 `plot_inputs.csv` and `row_selection.csv` document exactly which results were
 used. `all_node_inputs.csv` is added when optional all-node summaries are read.
 Repeated knitting replaces matching filenames. Use a new output directory when
 the input collection changes, so files from an earlier run are not mistaken for
 current results.
 
-```{r output-manifest}
+```{r output-manifest, results='asis'}
 if (length(figure_manifest)) {
   figure_manifest_table <- do.call(rbind, figure_manifest)
   write.csv(figure_manifest_table, file.path(figure_dir, "figure_manifest.csv"), row.names = FALSE)
-  knitr::kable(figure_manifest_table, row.names = FALSE)
+  if (knitr::is_latex_output()) {
+    cat("Figure numbers below follow the report and the row order in `figure_manifest.csv`. Full PDF/PNG filenames are recorded in the CSV.\n\n")
+    report_table(data.frame(Figure = seq_len(nrow(figure_manifest_table)),
+                            Description = figure_manifest_table$description),
+                 "Figure index", align = c("r", "p{0.82\\linewidth}"))
+  } else {
+    report_table(figure_manifest_table)
+  }
 }
 ```

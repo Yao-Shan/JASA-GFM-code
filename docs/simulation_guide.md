@@ -26,6 +26,42 @@ directory. For example, `../data/node1` means the repository's `data/node1`
 directory from either `simulations/` or `plots/`. Absolute paths are also
 accepted.
 
+### Choose HTML or PDF
+
+Both notebooks default to HTML. In RStudio, use the arrow beside **Knit** to
+choose **Knit to PDF**, or pass `output_format = "pdf_document"` to `render()`.
+PDF rendering requires a LaTeX installation with XeLaTeX; both notebooks select
+that engine and retain the generated `.tex` file through `keep_tex: true`.
+
+Changing the report format executes the notebook again with its current
+parameters. To check the simulation notebook's PDF output without repeating
+the Monte Carlo experiment:
+
+```r
+rmarkdown::render(
+  "simulations/node_inference.Rmd",
+  output_format = "pdf_document",
+  params = list(run_simulation = FALSE),
+  output_file = "truth_check.pdf"
+)
+```
+
+To make a PDF report from existing simulation results:
+
+```r
+rmarkdown::render(
+  "plots/plot_figures.Rmd",
+  output_format = "pdf_document",
+  params = list(data_dir = "../data/node1", output_dir = "../data/figures"),
+  output_file = "plot_figures.pdf"
+)
+```
+
+PDF reports hide source code; HTML reports make it available in collapsible
+code blocks. The plotting PDF embeds the vector PDF figures. Standalone PDF
+and PNG figure exports remain available in either report format, and the
+statistical calculations and parameter choices are unchanged.
+
 ## Paper simulation settings
 
 The simulation notebook's defaults run the main setting below. Knitting it
@@ -252,7 +288,7 @@ rmarkdown::render(
 
 The plots use open circles and a dashed identity reference line, without a
 reference band. Node components remain separate. Outputs include PDF and PNG
-figures, the rendered HTML notebook, and `plot_inputs.csv`, `row_selection.csv`,
+figures, the rendered HTML or PDF report, and `plot_inputs.csv`, `row_selection.csv`,
 and `figure_manifest.csv` records.
 
 For comparable panels, the notebook uses the same retained replications across
@@ -283,7 +319,7 @@ rmarkdown::render(
   params = list(
     data_dir = "../data/node1",
     output_dir = "../data/figures",
-    all_nodes_file = "../data/all_nodes/run_name/component_summary.csv"
+    all_nodes_file = "../data/all_nodes/run_name"
   )
 )
 ```
