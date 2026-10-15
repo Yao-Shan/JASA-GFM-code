@@ -1,0 +1,535 @@
+---
+title: "Plot existing GFM simulation results"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    code_folding: hide
+    self_contained: true
+params:
+  data_dir: "../data/node1"
+  output_dir: "../data/figures"
+  all_nodes_file: null
+  sample_sizes: null
+  main_n: null
+  max_columns: 4
+---
+
+This document reads existing simulation results. It does not simulate networks,
+fit models, or repeat Monte Carlo experiments. Open it in RStudio and **Knit to
+HTML**. Plotting uses base R; knitting also requires `rmarkdown` and `knitr`.
+Paths are relative to this document, in the repository's `plots` directory.
+
+Put the native `*_results.csv` and matching `*_config.rds` files under `data_dir`.
+Subdirectories are searched automatically; a single pair is sufficient. Keep
+different runs in separate directories: duplicate cases or incompatible seeds
+produce an error instead of silently combining results. `sample_sizes` optionally
+selects sample sizes; `main_n: null` selects the largest available sample size
+within each $K$ and $\Lambda$ group.
+Change `output_dir` for each collection if you want to preserve earlier figures.
+
+For optional all-node plots, set `all_nodes_file` to a native
+`component_summary.csv`, its run directory, or a YAML list of such paths. Each
+summary must retain its adjacent `config.rds`. Leave it `null` to produce the
+nodewise QQ plots alone. The older, aggregated plotting CSV without configuration
+files is not the input format of this portable document.
+When a native run directory contains both aggregate and per-case summaries,
+the per-case files and their matching configurations are used.
+
+## 1. Read and check the saved results
+
+Theorem 1 has $K$ coordinates and Theorem 2 has $P=K(K+1)/2$ coordinates.
+Coordinates are plotted separately. The CSV columns `raw_lambda_*` and
+`debiased_lambda_*` contain **standardized estimation errors**, not parameter
+estimates. A row is retained only when its fit converged and every plotted
+standardized component and joint statistic is finite. The same retained rows
+are used for all nodewise plots of that case. The tables below disclose exclusions;
+they can affect how the diagnostic plots should be interpreted.
+
+```{r setup}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = TRUE)
+data_dir <- params$data_dir
+figure_dir <- params$output_dir
+dir.create(figure_dir, recursive = TRUE, showWarnings = FALSE)
+max_columns <- as.integer(params$max_columns)
+if (length(max_columns) != 1L || is.na(max_columns) || max_columns < 1L ||
+    max_columns != params$max_columns) stop("max_columns must be a positive integer.")
+model_names <- c(gaussian = "Gaussian", poisson = "Poisson",
+                 logit = "Logit", probit = "Probit")
+blue <- "#176B98"; raw_gray <- "#8B9298"; ink <- "#253746"
+axis_gray <- "#6B7379"; point_size <- 0.36
+
+# Canonical names allow both native Bernoulli names and short model names.
+model_name <- function(x) sub("^bernoulli_", "", x)
+numbered_cols <- function(d, stem) {
+  cols <- grep(paste0("^", stem, "[0-9]+$"), names(d), value = TRUE)
+  cols[order(as.integer(sub(stem, "", cols, fixed = TRUE)))]
+}
+lambda_key <- function(x) paste(sprintf("%.17g", x), collapse = ",")
+lambda_label <- function(x) paste0("Lambda = (", paste(format(x, trim = TRUE, digits = 10), collapse = ", "), ")")
+
+# Configuration metadata, rather than filename fragments, identifies each case.
+read_config <- function(path) {
+  if (!file.exists(path)) stop("Missing configuration file: ", path)
+  cfg <- readRDS(path)
+  required <- c("model", "n", "k", "n_sim", "lambda_vec", "target_node",
+                "design_seed", "replication_seed_base", "truth_design")
+  if (!is.list(cfg) || !all(required %in% names(cfg)))
+    stop("Configuration lacks required metadata: ", path)
+  for (field in c("n", "k", "n_sim", "target_node", "design_seed", "replication_seed_base")) {
+    value <- cfg[[field]]
+    if (!is.numeric(value) || length(value) != 1L || !is.finite(value) ||
+        value != as.integer(value)) stop("Invalid ", field, " in ", path)
+  }
+  if (cfg$n < 2L || cfg$k < 1L || cfg$n_sim < 1L || cfg$target_node < 1L ||
+      cfg$target_node > cfg$n || !is.numeric(cfg$lambda_vec) ||
+      length(cfg$lambda_vec) != cfg$k || any(!is.finite(cfg$lambda_vec)))
+    stop("Invalid dimensions or Lambda in ", path)
+  cfg$model <- model_name(cfg$model)
+  if (length(cfg$model) != 1L || !cfg$model %in% names(model_names) ||
+      length(cfg$truth_design) != 1L || is.na(cfg$truth_design))
+    stop("Invalid model or design metadata: ", path)
+  cfg
+}
+case_key <- function(cfg) paste(cfg$model, cfg$n, cfg$k, lambda_key(cfg$lambda_vec), sep = "|")
+design_key <- function(cfg) paste(cfg$design_seed, cfg$replication_seed_base,
+                                 cfg$target_node, cfg$truth_design, sep = "|")
+group_key <- function(cfg) paste(cfg$k, lambda_key(cfg$lambda_vec), sep = "|")
+
+read_case <- function(path) {
+  cfg <- read_config(sub("_results[.]csv$", "_config.rds", path))
+  d <- read.csv(path, check.names = FALSE)
+  K <- cfg$k; P <- K * (K + 1L) / 2L
+  stems <- c("stat_U_", "raw_lambda_", "debiased_lambda_")
+  counts <- c(K, P, P)
+  for (j in seq_along(stems)) {
+    if (!identical(numbered_cols(d, stems[j]), paste0(stems[j], seq_len(counts[j]))))
+      stop("Component columns disagree with K in ", path)
+  }
+  columns <- c(paste0("stat_U_", seq_len(K)), paste0("raw_lambda_", seq_len(P)),
+               paste0("debiased_lambda_", seq_len(P)), "chi_sq_U", "chi_sq_debiased_lambda")
+  if (!all(c(columns, "convergence_code") %in% names(d)) || !nrow(d))
+    stop("Missing statistics or empty results in ", path)
+  # read.csv represents an entirely NA column as logical when every fit failed.
+  for (column in columns) if (is.logical(d[[column]]) && all(is.na(d[[column]])))
+    d[[column]] <- as.numeric(d[[column]])
+  if (!all(vapply(d[columns], is.numeric, logical(1))))
+    stop("Missing or nonnumeric statistics in ", path)
+  converged <- !is.na(d$convergence_code) & d$convergence_code == 0L
+  finite <- rowSums(!is.finite(as.matrix(d[columns]))) == 0L
+  keep <- converged & finite
+  used <- d[keep, , drop = FALSE]
+  # Preserve the joint statistics in the CSV, but verify their definitions.
+  if (nrow(used)) {
+    for (pair in list(c("chi_sq_U", "stat_U_"), c("chi_sq_debiased_lambda", "debiased_lambda_"))) {
+      sums <- rowSums(used[numbered_cols(used, pair[2])]^2)
+      if (any(abs(used[[pair[1]]] - sums) > 1e-8 * pmax(1, abs(sums))))
+        stop("Joint statistic disagrees with component squared norms in ", path)
+    }
+  }
+  used$chi_sq_raw_lambda <- rowSums(used[paste0("raw_lambda_", seq_len(P))]^2)
+  list(config = cfg, data = used, path = normalizePath(path),
+       attempted = nrow(d), converged = sum(converged), used = sum(keep),
+       selection = data.frame(row = seq_len(nrow(d)), converged = converged,
+                              finite = finite, included = keep))
+}
+
+paths <- sort(list.files(data_dir, pattern = "_results[.]csv$", recursive = TRUE, full.names = TRUE))
+if (!length(paths)) stop("No *_results.csv files found in data_dir. Run a simulation first, or point data_dir to existing native results.")
+cases <- lapply(paths, read_case)
+if (!is.null(params$sample_sizes)) {
+  sample_sizes <- as.numeric(unlist(params$sample_sizes))
+  if (!length(sample_sizes) || any(!is.finite(sample_sizes)) ||
+      any(sample_sizes < 2 | sample_sizes != as.integer(sample_sizes)))
+    stop("sample_sizes must contain integer sample sizes of at least 2.")
+  cases <- Filter(function(x) x$config$n %in% sample_sizes, cases)
+}
+if (!length(cases)) stop("No results match sample_sizes.")
+keys <- vapply(cases, function(x) case_key(x$config), character(1))
+if (anyDuplicated(keys)) stop("Duplicate model/n/Lambda cases found. Set data_dir to one selected run; duplicate key: ", keys[duplicated(keys)][1])
+if (length(unique(vapply(cases, function(x) design_key(x$config), character(1)))) != 1L)
+  stop("Results have different design seeds, replication seeds, target nodes, or truth designs. Select one coherent run collection.")
+names(cases) <- keys
+available_n <- sort(unique(vapply(cases, function(x) x$config$n, numeric(1))))
+main_n <- if (is.null(params$main_n)) max(available_n) else params$main_n
+if (length(main_n) != 1L || !is.numeric(main_n) || !main_n %in% available_n)
+  stop("main_n must be one of the available sample sizes: ", paste(available_n, collapse = ", "))
+input_table <- do.call(rbind, lapply(cases, function(x) data.frame(
+  model = x$config$model, n = x$config$n, K = x$config$k,
+  lambda = lambda_key(x$config$lambda_vec), target_node = x$config$target_node,
+  design_seed = x$config$design_seed, replication_seed_base = x$config$replication_seed_base,
+  planned = x$config$n_sim, attempted = x$attempted, converged = x$converged,
+  used = x$used, excluded = x$attempted - x$used, csv = x$path)))
+row_selection <- do.call(rbind, lapply(cases, function(x) cbind(csv = x$path, x$selection)))
+write.csv(input_table, file.path(figure_dir, "plot_inputs.csv"), row.names = FALSE)
+write.csv(row_selection, file.path(figure_dir, "row_selection.csv"), row.names = FALSE)
+knitr::kable(input_table[setdiff(names(input_table), "csv")], row.names = FALSE)
+if (any(input_table$excluded > 0L)) warning("Some replications were excluded. See the table and row_selection.csv; plots describe the retained replications.")
+if (any(input_table$planned != input_table$attempted)) warning("Saved row counts differ from planned repetitions for some cases. See plot_inputs.csv.")
+```
+
+`used` counts successful fits with finite values for all displayed statistics.
+Cases with fewer than two retained replications are marked unavailable in their
+panels. Changing this plot document cannot repair failed fits. An input log and
+the inclusion decision for every original CSV row are saved beside the figures.
+
+## 2. Plotting functions
+
+For $R$ retained replications, the theoretical quantiles use
+$p_r=(r-1/2)/R$. Normal QQ plots use $\Phi^{-1}(p_r)$; joint QQ plots use
+$F^{-1}_{\chi^2_d}(p_r)$, with $d=K$ or $P$. Each retained replication appears
+as one open circle. The dashed line is $y=x$; no reference band is added and
+the saved statistics are never recentered or rescaled.
+
+```{r plotting-functions}
+theoretical <- function(R, df = NULL) {
+  p <- (seq_len(R) - 0.5) / R
+  if (is.null(df)) qnorm(p) else qchisq(p, df)
+}
+safe_range <- function(x, zero = FALSE) {
+  x <- x[is.finite(x)]
+  if (!length(x)) x <- if (zero) c(0, 1) else c(-3, 3)
+  r <- range(x); pad <- max(diff(r) * 0.045, 0.12)
+  if (zero) c(0, max(r[2], 0) + pad) else r + c(-pad, pad)
+}
+pages <- function(values) split(values, ceiling(seq_along(values) / max_columns))
+ordered_models <- function(collection) {
+  names(model_names)[names(model_names) %in% vapply(collection, function(x) x$config$model, character(1))]
+}
+get_case <- function(collection, model, n) {
+  hit <- Filter(function(x) x$config$model == model && x$config$n == n, collection)
+  if (length(hit)) hit[[1]] else NULL
+}
+# Matched panels share limits across the available sample sizes for one model.
+qq_limits <- function(collection, model, columns, df = NULL) {
+  selected <- Filter(function(x) x$config$model == model && x$used >= 2L, collection)
+  theoretical_values <- unlist(lapply(selected, function(x) theoretical(x$used, df)))
+  empirical_values <- unlist(lapply(selected, function(x) as.matrix(x$data[columns])))
+  list(x = safe_range(theoretical_values, !is.null(df)),
+       y = safe_range(c(theoretical_values, empirical_values), !is.null(df)))
+}
+start_grid <- function(nr, nc, top_labels, row_labels,
+                       xlab = "Standard normal quantiles", ylab = "Empirical quantiles",
+                       legend_labels = NULL) {
+  par(mar = c(0, 0, 0, 0), oma = c(0, 0, 0, 0), las = 1,
+      xaxs = "i", yaxs = "i", col.axis = ink, col.lab = ink, fg = ink)
+  width <- par("din")[1]; height <- par("din")[2]
+  top <- if (is.null(legend_labels)) 0.54 else 0.91
+  list(nr = nr, nc = nc, width = width, height = height, top = top,
+       left = 0.87, bottom = 0.56, gapx = 0.43, gapy = 0.30,
+       pw = (width - 1.02 - (nc - 1L) * 0.43) / nc,
+       ph = (height - 0.56 - top - (nr - 1L) * 0.30) / nr,
+       top_labels = top_labels, row_labels = row_labels, xlab = xlab, ylab = ylab,
+       legend_labels = legend_labels)
+}
+open_panel <- function(g, row, column) {
+  x <- g$left + (column - 1L) * (g$pw + g$gapx)
+  y <- g$bottom + (g$nr - row) * (g$ph + g$gapy)
+  par(fig = c(x, x + g$pw, y, y + g$ph) / c(g$width, g$width, g$height, g$height),
+      mar = c(0, 0, 0, 0), new = !(row == 1L && column == 1L), xpd = FALSE)
+  plot.new()
+}
+finish_grid <- function(g) {
+  par(fig = c(0, 1, 0, 1), mar = c(0, 0, 0, 0), new = TRUE, xpd = NA)
+  plot.new(); plot.window(c(0, g$width), c(0, g$height))
+  cx <- g$left + g$pw / 2 + (seq_len(g$nc) - 1) * (g$pw + g$gapx)
+  cy <- g$bottom + g$ph / 2 + (g$nr - seq_len(g$nr)) * (g$ph + g$gapy)
+  text(cx, g$height - g$top + 0.30, g$top_labels, cex = 0.90, font = 2)
+  text(0.35, cy, g$row_labels, srt = 90, cex = 0.92, font = 2)
+  text(g$width / 2, 0.13, g$xlab, cex = 0.95)
+  text(0.09, g$height / 2, g$ylab, srt = 90, cex = 0.90)
+  if (!is.null(g$legend_labels)) legend(g$width / 2, g$height - 0.04,
+      legend = g$legend_labels, col = c(raw_gray, blue), pch = 1,
+      pt.cex = 0.7, cex = 0.85, horiz = TRUE, bty = "n", xjust = 0.5, yjust = 1)
+}
+qq_panel <- function(g, row, column, case, limits, columns, df = NULL, colors = blue) {
+  open_panel(g, row, column)
+  plot.window(limits$x, limits$y)
+  abline(a = 0, b = 1, lty = 2, lwd = 0.65, col = "#555E66")
+  axis(1, cex.axis = 0.77, mgp = c(0, 0.3, 0), tck = -0.03)
+  axis(2, cex.axis = 0.77, mgp = c(0, 0.3, 0), tck = -0.03)
+  box(col = "#B2B8BC", lwd = 0.5)
+  if (is.null(case) || case$used < 2L) {
+    text(mean(limits$x), mean(limits$y), "Unavailable", cex = 0.8)
+  } else for (j in seq_along(columns)) {
+    points(theoretical(case$used, df), sort(case$data[[columns[j]]]),
+           pch = 1, cex = point_size, lwd = 0.52, col = rep(colors, length.out = length(columns))[j])
+  }
+}
+
+# Save the same deterministic drawing to PDF and PNG, and include its PNG in HTML.
+figure_manifest <- list()
+save_figure <- function(name, caption, draw, nr, nc, height = NULL, width = NULL) {
+  if (is.null(width)) width <- max(4.0, 1.02 + 1.65 * nc + 0.43 * (nc - 1L))
+  if (is.null(height)) height <- max(3.2, 1.1 + 1.45 * nr + 0.30 * (nr - 1L))
+  pdf_file <- file.path(figure_dir, paste0(name, ".pdf"))
+  png_file <- file.path(figure_dir, paste0(name, ".png"))
+  pdf(pdf_file, width = width, height = height, pointsize = 9, useDingbats = FALSE)
+  tryCatch(draw(), finally = dev.off())
+  png(png_file, width = width, height = height, units = "in", res = 160, pointsize = 9)
+  tryCatch(draw(), finally = dev.off())
+  figure_manifest[[length(figure_manifest) + 1L]] <<- data.frame(
+    figure = name, description = caption, pdf = basename(pdf_file), png = basename(png_file))
+  cat("\n\n![", caption, "](<", normalizePath(png_file), ">)\n\n", sep = "")
+}
+groups <- split(cases, vapply(cases, function(x) group_key(x$config), character(1)))
+```
+
+## 3. Nodewise and sample-size QQ plots
+
+Each group fixes $K$ and $\Lambda$. Models occupy rows. Missing model/sample-size
+combinations are labelled unavailable; a full grid of simulation runs is not
+required. Components or sample sizes beyond `max_columns` continue on another
+figure. Raw Theorem 2 results are gray and debiased results are blue. Their
+overlay uses identical replications and axes. A shift in the raw curve need
+not indicate a failure of the bias-corrected theorem.
+
+```{r qq-figures, results='asis'}
+for (group_id in seq_along(groups)) {
+  collection <- groups[[group_id]]
+  cfg <- collection[[1]]$config
+  K <- cfg$k; P <- K * (K + 1L) / 2L
+  models <- ordered_models(collection)
+  ns <- sort(unique(vapply(collection, function(x) x$config$n, numeric(1))))
+  group_main_n <- if (is.null(params$main_n)) max(ns) else main_n
+  prefix <- sprintf("group_%02d", group_id)
+  label <- paste(lambda_label(cfg$lambda_vec), "node", cfg$target_node, sep = "; ")
+  specs <- list(
+    theorem1 = list(columns = paste0("stat_U_", seq_len(K)), df = NULL),
+    theorem2 = list(columns = paste0("debiased_lambda_", seq_len(P)), df = NULL),
+    joint = list(columns = c("chi_sq_U", "chi_sq_raw_lambda", "chi_sq_debiased_lambda"), df = c(K, P, P)))
+  if (!group_main_n %in% ns) cat("\n\nMain QQ plots skipped for ", label,
+                                 ": requested main_n is unavailable in this group.\n\n", sep = "")
+  if (group_main_n %in% ns) for (kind in names(specs)) {
+    spec <- specs[[kind]]
+    component_pages <- pages(seq_along(spec$columns))
+    for (page in seq_along(component_pages)) {
+      indices <- component_pages[[page]]
+      headings <- if (kind == "joint") c("Theorem 1", "Theorem 2: raw", "Theorem 2: debiased")[indices] else paste("Component", indices)
+      caption <- paste(kind, label, paste0("n = ", group_main_n), paste0("page ", page), sep = "; ")
+      if (kind == "theorem2") caption <- paste(caption, "Raw (gray) and debiased (blue).")
+      draw <- function() {
+        g <- start_grid(length(models), length(indices), headings, unname(model_names[models]),
+                        xlab = if (kind == "joint") paste0("Chi-square quantiles (df: ", paste(spec$df[indices], collapse = ", "), ")") else "Standard normal quantiles",
+                        legend_labels = if (kind == "theorem2") c("Raw", "Debiased") else NULL)
+        for (r in seq_along(models)) for (j in seq_along(indices)) {
+          index <- indices[j]; cols <- spec$columns[index]
+          if (kind == "theorem2") cols <- c(paste0("raw_lambda_", index), cols)
+          df <- if (is.null(spec$df)) NULL else spec$df[index]
+          colors <- if (kind == "theorem2") c(raw_gray, blue) else if (kind == "joint" && index == 2L) raw_gray else blue
+          qq_panel(g, r, j, get_case(collection, models[r], group_main_n),
+                   qq_limits(collection, models[r], cols, df), cols, df, colors)
+        }
+        finish_grid(g)
+      }
+      save_figure(paste(prefix, kind, paste0("n", group_main_n), paste0("page", page), sep = "_"),
+                  caption, draw, length(models), length(indices))
+    }
+  }
+  if (length(ns) > 1L) for (kind in names(specs)) {
+    spec <- specs[[kind]]
+    # Joint sample-size comparisons include Theorems 1 and 2 after correction.
+    indices <- if (kind == "joint") c(1L, 3L) else seq_along(spec$columns)
+    n_pages <- pages(ns)
+    for (index in indices) for (page in seq_along(n_pages)) {
+      shown_n <- n_pages[[page]]; column <- spec$columns[index]
+      df <- if (is.null(spec$df)) NULL else spec$df[index]
+      caption <- paste("Sample-size comparison", label, column, paste0("page ", page), sep = "; ")
+      draw <- function() {
+        g <- start_grid(length(models), length(shown_n), paste0("n = ", shown_n),
+                        unname(model_names[models]),
+                        xlab = if (is.null(df)) "Standard normal quantiles" else paste0("Chi-square quantiles (df = ", df, ")"))
+        for (r in seq_along(models)) for (j in seq_along(shown_n)) {
+          qq_panel(g, r, j, get_case(collection, models[r], shown_n[j]),
+                   qq_limits(collection, models[r], column, df), column, df)
+        }
+        finish_grid(g)
+      }
+      save_figure(paste(prefix, "sizes", column, paste0("page", page), sep = "_"),
+                  caption, draw, length(models), length(shown_n))
+    }
+  }
+}
+```
+
+## 4. Optional all-node diagnostics
+
+Each box summarizes **nodes**, separately for one component: the nodewise mean
+or sample variance is calculated across the saved replications before the box
+is drawn. The native summary stores a standard deviation, so the variance is
+its square. A dot represents one node; slight deterministic horizontal offsets
+make overlapping dots visible. Nodes share simulated networks and are not
+independent observations. Reference lines are 0 for the mean and 1 for variance.
+
+The heatmaps retain each node's index. They display means, variances, and marginal
+95% coverage, with colors centered at 0, 1, and 0.95. Coverage is read from the
+summary rather than inferred from the mean and variance. All nodes are required;
+unavailable node summaries cause an error instead of quietly disappearing.
+Unlike the nodewise QQ selection, the native all-node summaries require all
+planned replications for every node. Incomplete all-node summaries are rejected.
+
+```{r all-node-data, results='asis'}
+all_nodes <- NULL
+if (is.null(params$all_nodes_file)) {
+  cat("All-node plots are skipped because `all_nodes_file` is null.\n")
+} else {
+  requested <- as.character(unlist(params$all_nodes_file))
+  node_paths <- unique(unlist(lapply(requested, function(path) {
+    if (!file.exists(path)) stop("Missing all-node input: ", path)
+    if (!dir.exists(path)) return(path)
+    found <- list.files(path, "^component_summary[.]csv$", recursive = TRUE, full.names = TRUE)
+    paired <- file.exists(file.path(dirname(found), "config.rds"))
+    # Native runs also contain an aggregate summary above the per-case folders.
+    # Use the per-case copies with their own configurations, without duplicates.
+    for (aggregate in found[!paired]) {
+      has_children <- any(startsWith(found[paired], paste0(dirname(aggregate), "/")))
+      if (!has_children) stop("Missing config.rds beside all-node summary: ", aggregate)
+      message("Using per-case summaries instead of aggregate: ", aggregate)
+    }
+    found[paired]
+  })))
+  if (!length(node_paths)) stop("No component_summary.csv files found.")
+  node_inputs <- lapply(sort(node_paths), function(path) {
+    cfg <- read_config(file.path(dirname(path), "config.rds"))
+    d <- read.csv(path, check.names = FALSE)
+    need <- c("model", "n", "k", "node", "component", "design_seed", "lambda_label",
+              "total_reps", "valid_reps", "invalid_reps", "complete", "mean", "sd", "marginal_coverage")
+    if (!all(need %in% names(d))) stop("Missing all-node summary columns: ", path)
+    expected_label <- paste0("(", paste(format(cfg$lambda_vec, trim = TRUE, digits = 10), collapse = ", "), ")")
+    if (!all(model_name(d$model) == cfg$model & d$n == cfg$n & d$k == cfg$k &
+             d$design_seed == cfg$design_seed) ||
+        !all(gsub(" ", "", d$lambda_label) == gsub(" ", "", expected_label)))
+      stop("All-node summary disagrees with its configuration: ", path)
+    if (nrow(d) != cfg$n * cfg$k ||
+        !setequal(paste(d$node, d$component), as.vector(outer(seq_len(cfg$n), seq_len(cfg$k), paste))) ||
+        anyDuplicated(paste(d$node, d$component)))
+      stop("Each node/component must occur exactly once: ", path)
+    values <- as.matrix(d[c("mean", "sd", "marginal_coverage", "total_reps", "valid_reps", "invalid_reps")])
+    if (anyNA(d$complete) || !all(d$complete %in% TRUE) ||
+        anyNA(d[c("total_reps", "valid_reps", "invalid_reps")]) ||
+        any(d$total_reps != cfg$n_sim | d$valid_reps != cfg$n_sim | d$invalid_reps != 0L))
+      stop("All-node plots require every planned replication at every node; incomplete summaries found in ", path)
+    if (!is.numeric(values) || any(!is.finite(values)) || any(d$valid_reps < 2L) ||
+        any(d$total_reps < d$valid_reps | d$invalid_reps != d$total_reps - d$valid_reps) ||
+        any(d$sd < 0 | d$marginal_coverage < 0 | d$marginal_coverage > 1))
+      stop("Invalid or unavailable all-node summaries: ", path)
+    d$model <- cfg$model; d$variance <- d$sd^2
+    d$group <- group_key(cfg); d$lambda <- lambda_label(cfg$lambda_vec)
+    list(config = cfg, data = d, path = normalizePath(path))
+  })
+  if (!is.null(params$sample_sizes)) node_inputs <- Filter(function(x) x$config$n %in% sample_sizes, node_inputs)
+  if (!length(node_inputs)) stop("No all-node summaries match sample_sizes.")
+  if (anyDuplicated(vapply(node_inputs, function(x) case_key(x$config), character(1))))
+    stop("Duplicate all-node cases. Select one run or explicitly selected summary files.")
+  if (any(vapply(node_inputs, function(x) design_key(x$config), character(1)) != design_key(cases[[1]]$config)))
+    stop("All-node and nodewise results have incompatible seeds, target nodes, or truth designs.")
+  all_nodes <- do.call(rbind, lapply(node_inputs, `[[`, "data"))
+  all_node_log <- do.call(rbind, lapply(node_inputs, function(x) data.frame(
+    model = x$config$model, n = x$config$n, K = x$config$k, lambda = lambda_key(x$config$lambda_vec),
+    nodes = length(unique(x$data$node)), min_valid = min(x$data$valid_reps),
+    max_valid = max(x$data$valid_reps), max_invalid = max(x$data$invalid_reps), csv = x$path)))
+  write.csv(all_node_log, file.path(figure_dir, "all_node_inputs.csv"), row.names = FALSE)
+  print(knitr::kable(all_node_log[setdiff(names(all_node_log), "csv")], row.names = FALSE))
+}
+```
+
+```{r all-node-figures, results='asis'}
+if (!is.null(all_nodes)) {
+  node_groups <- split(all_nodes, all_nodes$group)
+  for (group_id in seq_along(node_groups)) {
+    d <- node_groups[[group_id]]
+    models <- names(model_names)[names(model_names) %in% d$model]
+    ns <- sort(unique(d$n)); K <- unique(d$k)
+    label <- unique(d$lambda)
+    model_pages <- pages(models)
+    for (component in seq_len(K)) for (page in seq_along(model_pages)) {
+      shown_models <- model_pages[[page]]
+      draw <- function() {
+        g <- start_grid(2L, length(shown_models), unname(model_names[shown_models]),
+                        c("Mean", "Variance"), xlab = "Number of nodes", ylab = "")
+        for (row in 1:2) for (col in seq_along(shown_models)) {
+          metric <- c("mean", "variance")[row]; ref <- c(0, 1)[row]
+          open_panel(g, row, col)
+          ylim <- safe_range(c(d[[metric]][d$component == component], ref))
+          plot.window(c(0.55, length(ns) + 0.45), ylim)
+          abline(h = ref, lty = 2, col = "#7A8187", lwd = 0.7)
+          for (j in seq_along(ns)) {
+            z <- d[d$model == shown_models[col] & d$n == ns[j] & d$component == component, ]
+            if (!nrow(z)) next
+            offset <- 0.30 * (((z$node * ((sqrt(5) - 1) / 2)) %% 1) - 0.5)
+            points(j + offset, z[[metric]], pch = 16, cex = 0.24, col = adjustcolor(blue, 0.35))
+            boxplot(z[[metric]], at = j, add = TRUE, axes = FALSE, outline = FALSE,
+                    boxwex = 0.49, col = NA, border = ink, lwd = 0.7, whisklty = 1)
+          }
+          axis(1, at = seq_along(ns), labels = ns, cex.axis = 0.76, mgp = c(0, 0.3, 0), tck = -0.03)
+          axis(2, cex.axis = 0.76, mgp = c(0, 0.3, 0), tck = -0.03)
+          box(col = "#B2B8BC", lwd = 0.5)
+        }
+        finish_grid(g)
+      }
+      save_figure(sprintf("allnodes_group_%02d_component%d_page%d", group_id, component, page),
+                  paste("All nodes", label, paste("component", component), sep = "; "), draw, 2L, length(shown_models))
+    }
+    # Heatmaps show the largest available n in this optional all-node group.
+    map_n <- max(ns); map_data <- d[d$n == map_n, ]
+    rows <- unique(map_data[c("model", "component")])
+    rows <- rows[order(match(rows$model, names(model_names)), rows$component), ]
+    row_pages <- split(seq_len(nrow(rows)), ceiling(seq_len(nrow(rows)) / 12L))
+    metrics <- c("mean", "variance", "marginal_coverage")
+    centers <- c(mean = 0, variance = 1, marginal_coverage = 0.95)
+    titles <- c(mean = "Mean", variance = "Variance", marginal_coverage = "Marginal 95% coverage")
+    palette <- colorRampPalette(c("#216A95", "#A8CDE0", "#FAFAF7", "#EFC8A3", "#B85E24"))(201L)
+    for (page in seq_along(row_pages)) {
+      shown_rows <- rows[row_pages[[page]], , drop = FALSE]
+      draw <- function() {
+        layout(matrix(seq_len(6L), nrow = 3L, byrow = TRUE), widths = c(12, 1))
+        for (metric in metrics) {
+          values <- vapply(seq_len(nrow(shown_rows)), function(j) {
+            z <- map_data[map_data$model == shown_rows$model[j] & map_data$component == shown_rows$component[j], ]
+            z[[metric]][order(z$node)]
+          }, numeric(map_n))
+          dev <- max(1e-6, abs(map_data[[metric]] - centers[[metric]]))
+          lim <- centers[[metric]] + c(-dev, dev)
+          nr <- nrow(shown_rows)
+          par(mar = c(2.4, 7.1, 2.3, 0.3), mgp = c(1.3, 0.3, 0), las = 1)
+          image(seq_len(map_n), seq_len(nr), values[, rev(seq_len(nr)), drop = FALSE],
+                col = palette, zlim = lim, xlim = c(0.5, map_n + 0.5), ylim = c(0.5, nr + 0.5),
+                axes = FALSE, xlab = "Node index", ylab = "", useRaster = FALSE)
+          axis(1, at = unique(c(1L, round(map_n * (1:4) / 4))), cex.axis = 0.8)
+          axis(2, at = seq_len(nr), labels = rev(paste(model_names[shown_rows$model], shown_rows$component, sep = " / ")),
+               tick = FALSE, cex.axis = 0.8)
+          title(main = titles[[metric]], adj = 0, cex.main = 1)
+          box(col = "#B2B8BC", lwd = 0.5)
+          par(mar = c(2.4, 0.1, 2.3, 3.4), mgp = c(1.3, 0.3, 0), las = 1)
+          ticks <- seq(lim[1], lim[2], length.out = 201L)
+          image(1, ticks, matrix(ticks, nrow = 1L), col = palette, zlim = lim, axes = FALSE, xlab = "", ylab = "")
+          at <- c(lim[1], centers[[metric]], lim[2])
+          axis(4, at = at, labels = formatC(at, format = "f", digits = 3), cex.axis = 0.70)
+          box(col = "#B2B8BC", lwd = 0.5)
+        }
+      }
+      save_figure(sprintf("allnodes_group_%02d_map_n%d_page%d", group_id, map_n, page),
+                  paste("All nodes", label, paste0("n = ", map_n), paste("page", page), sep = "; "),
+                  draw, 3L, 1L, width = 8.0, height = max(6.0, 2.8 + 0.60 * nrow(shown_rows)))
+    }
+  }
+}
+```
+
+## 5. Output files
+
+Each displayed figure is saved as PDF and PNG in `output_dir`. The HTML embeds
+the PNG images. `figure_manifest.csv` maps filenames to their settings;
+`plot_inputs.csv` and `row_selection.csv` document exactly which results were
+used. `all_node_inputs.csv` is added when optional all-node summaries are read.
+Repeated knitting replaces matching filenames. Use a new output directory when
+the input collection changes, so files from an earlier run are not mistaken for
+current results.
+
+```{r output-manifest}
+if (length(figure_manifest)) {
+  figure_manifest_table <- do.call(rbind, figure_manifest)
+  write.csv(figure_manifest_table, file.path(figure_dir, "figure_manifest.csv"), row.names = FALSE)
+  knitr::kable(figure_manifest_table, row.names = FALSE)
+}
+```

@@ -43,6 +43,11 @@ vignettes/*.pdf
 /data/
 /simulations/*.html
 /simulations/*.pdf
+/plots/*.html
+/plots/*.pdf
+/plots/*.png
+/plots/*_files/
+/simulations/*_files/
 
 # macOS metadata
 .DS_Store

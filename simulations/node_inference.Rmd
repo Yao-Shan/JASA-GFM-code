@@ -5,16 +5,16 @@ date: "`r Sys.Date()`"
 output: html_document
 params:
   # Observation model; use "all" to run the four models sequentially.
-  model: "poisson"
+  model: "all"
   # false checks the latent truth only; it does not reload saved results.
   run_simulation: true
-  n: 500                  # Number of nodes in each network.
+  n: 1000                 # Number of nodes in each network.
   n_sim: 1000             # Number of independently simulated networks.
-  k: 2                    # Latent dimension; null infers it from lambda_values.
+  k: null                 # Latent dimension; null infers it from lambda_values.
   # Diagonal entries of Lambda_star; keep this comma-separated value quoted.
   lambda_values: "0.5,0.5"
-  design_seed: null       # Latent-design seed; null uses the model default.
-  replication_seed_base: null  # Network replication r uses base + r.
+  design_seed: 238687     # Fixed latent design used in the paper configuration.
+  replication_seed_base: 2000  # Network replication r uses base + r.
   target_node: 1          # Node evaluated by Theorem 1; an integer in 1,...,n.
   sigma: null             # Gaussian noise SD; null uses the model default.
   learning_rate: null
@@ -30,8 +30,8 @@ params:
   whitening_eigen_floor: null  # Reject an ill-conditioned second moment.
   truth_check_action: "warning"
   n_cores: 7              # Parallel workers; the implementation caps this at seven.
-  # Relative to this Rmd when knitted; use a distinct folder for each setting.
-  output_dir: "../data/node1/n500_equal/poisson"
+  # null builds a folder from n, K, Lambda, target node, and model.
+  output_dir: null
 ---
 
 ## Purpose and configuration
@@ -54,11 +54,21 @@ the model defaults in `default_model_configs()`.
 - `run_simulation: false` constructs and checks the truth without running
   Monte Carlo replications or saving their outputs. It does not reload CSVs.
 
-Use the YAML header as the record of the selected experiment, and update
-`output_dir` when changing its settings. When knitted in RStudio, relative
-paths start from this notebook's `simulations/` directory. For `model: "all"`,
-give a common output directory; the code adds one subdirectory per model.
-The models run sequentially, with at most seven workers within each model.
+The default experiment uses all four models, $n=1000$, $1000$ replications,
+node 1, and $\Lambda^\star=\operatorname{diag}(0.5,0.5)$.
+See [the simulation guide](../docs/simulation_guide.md) for the second Lambda
+setting, the sample-size comparison, and a small trial run.
+The fixed design seed was selected after examining simulation performance;
+these results should not be described as an independent seed validation.
+
+Use the YAML header as the record of the selected experiment. With
+`output_dir: null`, the output folder records n, K, Lambda, and the target node,
+with a separate subdirectory for each model. An explicit `output_dir` is used
+as supplied for one model; for `model: "all"`, model subdirectories are added.
+When knitted in RStudio, relative paths start from this notebook's
+`simulations/` directory. Repeating an identical configuration overwrites its
+result files. The models run sequentially, with at most seven workers within
+each model.
 
 ## Fixed latent design and network generation
 
@@ -129,15 +139,15 @@ library(foreach)
 
 # Supply fallback runtime parameters when extracted R code is sourced.
 # Existing params entries take precedence, including explicit NULL values.
-# Supply a valid n/target_node combination; the bare fallbacks are not
-# a complete runnable experiment. The YAML above supplies these overrides.
+# Fallback experiment parameters match the paper configuration. Sourcing
+# extracted code checks the truth only unless run_simulation is enabled.
 default_runtime_params <- list(
   model = "all",
   run_simulation = FALSE,
   n = NULL,
   n_sim = NULL,
   k = NULL,
-  lambda_values = "0.40, 0.35",
+  lambda_values = NULL,
   design_seed = NULL,
   replication_seed_base = NULL,
   target_node = NULL,
@@ -152,8 +162,8 @@ default_runtime_params <- list(
   curvature_floor = NULL,
   node_information_floor = NULL,
   whitening_eigen_floor = NULL,
-  truth_check_action = "error",
-  n_cores = NULL,
+  truth_check_action = "warning",
+  n_cores = 7L,
   output_dir = NULL
 )
 runtime_params <- default_runtime_params
@@ -276,15 +286,14 @@ resolve_latent_parameters <- function(base_config, k_value, lambda_values) {
 # probability_floor, curvature_floor, and node_information_floor are
 # truth-diagnostic thresholds; they do not regularize the fitted model.
 default_model_configs <- function() {
-  # YAML parameters override these values before validation; target_node must
-  # lie in 1,...,n. For final runs, set n and n_sim explicitly (for example
-  # n=1000, n_sim=1000) and choose worker counts within the memory budget.
+  # Each bare configuration is valid and uses the main paper setting.
+  # Non-NULL YAML parameters override these values before validation.
   list(
     bernoulli_logit = list(
       model = "bernoulli_logit",
-      n = 300L, k = 2L, n_sim = 100L,
-      lambda_vec = c(0.40, 0.35), sigma = 1,
-      target_node = 813L,
+      n = 1000L, k = 2L, n_sim = 1000L,
+      lambda_vec = c(0.5, 0.5), sigma = 1,
+      target_node = 1L,
       design_seed = 238687L, replication_seed_base = 2000L,
       max_iter = 40000L, learning_rate = 1, tolerance = 1e-1,
       M_bound_U = 20, M_bound_Lambda = 20,
@@ -298,9 +307,9 @@ default_model_configs <- function() {
     ),
     bernoulli_probit = list(
       model = "bernoulli_probit",
-      n = 300L, k = 2L, n_sim = 100L,
-      lambda_vec = c(0.40, 0.35), sigma = 1,
-      target_node = 813L,
+      n = 1000L, k = 2L, n_sim = 1000L,
+      lambda_vec = c(0.5, 0.5), sigma = 1,
+      target_node = 1L,
       design_seed = 238687L, replication_seed_base = 2000L,
       max_iter = 40000L, learning_rate = 1, tolerance = 1e-3,
       M_bound_U = 20, M_bound_Lambda = 20,
@@ -314,9 +323,9 @@ default_model_configs <- function() {
     ),
     gaussian = list(
       model = "gaussian",
-      n = 300L, k = 2L, n_sim = 100L,
-      lambda_vec = c(0.40, 0.35), sigma = 1,
-      target_node = 813L,
+      n = 1000L, k = 2L, n_sim = 1000L,
+      lambda_vec = c(0.5, 0.5), sigma = 1,
+      target_node = 1L,
       design_seed = 238687L, replication_seed_base = 2000L,
       max_iter = 10000L, learning_rate = 0.1, tolerance = 1e-1,
       M_bound_U = 20, M_bound_Lambda = 20,
@@ -330,9 +339,9 @@ default_model_configs <- function() {
     ),
     poisson = list(
       model = "poisson",
-      n = 300L, k = 2L, n_sim = 100L,
-      lambda_vec = c(0.40, 0.35), sigma = 1,
-      target_node = 813L,
+      n = 1000L, k = 2L, n_sim = 1000L,
+      lambda_vec = c(0.5, 0.5), sigma = 1,
+      target_node = 1L,
       design_seed = 238687L, replication_seed_base = 2000L,
       max_iter = 60000L, learning_rate = 2e-2, tolerance = 1e-4,
       M_bound_U = 20, M_bound_Lambda = 20,
@@ -2465,6 +2474,26 @@ numeric_vector_tag <- function(x, readable_limit = 6L) {
   paste0(readable, "_h", hash)
 }
 
+# Resolve a setting-specific output directory without creating it.
+# Explicit paths keep the existing single-model and multi-model behavior.
+simulation_output_dir <- function(config, output_dir = NULL,
+                                  multiple_models = FALSE) {
+  model_dir <- sub("^bernoulli_", "", config$model)
+  if (!is.null(output_dir)) {
+    if (length(output_dir) != 1L || !is.character(output_dir) ||
+        is.na(output_dir) || !nzchar(output_dir)) {
+      stop("output_dir must be NULL or one nonempty character string.")
+    }
+    return(if (isTRUE(multiple_models)) file.path(output_dir, model_dir)
+           else output_dir)
+  }
+  setting <- paste0("n", config$n, "_k", config$k,
+                    "_lambda_", numeric_vector_tag(config$lambda_vec),
+                    "_target", config$target_node)
+  file.path("..", "data", paste0("node", config$target_node),
+            setting, model_dir)
+}
+
 # Save the full result table (including failures) as CSV, plus RDS files
 # for results with attributes, truth, configuration, and execution settings.
 # CSV does not retain R attributes: keep its configuration when sharing it.
@@ -2616,10 +2645,9 @@ if (!is.null(requested_cores) &&
 if (!is.null(requested_cores)) requested_cores <- as.integer(requested_cores)
 
 root_output_dir <- runtime_params$output_dir
-if (is.null(root_output_dir)) {
-  root_output_dir <- "../data/node1/new_run"
-} else if (length(root_output_dir) != 1L ||
-           !is.character(root_output_dir) || !nzchar(root_output_dir)) {
+if (!is.null(root_output_dir) &&
+    (length(root_output_dir) != 1L || !is.character(root_output_dir) ||
+     is.na(root_output_dir) || !nzchar(root_output_dir))) {
   stop("output_dir must be NULL or one nonempty character string.")
 }
 
@@ -2678,11 +2706,9 @@ for (selected_model in selected_models) {
       config, n_cores = requested_cores, truth = truth
     )
     print_simulation_summary(results, config)
-    model_output_dir <- if (length(selected_models) > 1L) {
-      file.path(root_output_dir, sub("^bernoulli_", "", config$model))
-    } else {
-      root_output_dir
-    }
+    model_output_dir <- simulation_output_dir(
+      config, root_output_dir, multiple_models = length(selected_models) > 1L
+    )
     output_files <- save_outputs(results, config, model_output_dir)
     results_by_model[[config$model]] <- results
     truth_by_model[[config$model]] <- attr(results, "truth")
