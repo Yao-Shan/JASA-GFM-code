@@ -17,14 +17,14 @@ diagonal entries (0.5, 0.5) or (0.7, −0.5). Each setting uses
 Theorem 2 concerns the global parameter Lambda and does not
 depend on the selected node.
 
-The current YAML uses a small trial setting. For the main paper sample size
-and repetition count, change both `n` and `n_sim` to 1000:
+The current YAML uses the main paper sample size and repetition count.
+Reduce `n` and `n_sim` for a small trial:
 
 | Parameter | Default | Meaning |
 | --- | --- | --- |
 | `model` | `"all"` | Run all four models |
-| `n` | `100` | Number of nodes per network |
-| `n_sim` | `100` | Number of network replications |
+| `n` | `1000` | Number of nodes per network |
+| `n_sim` | `1000` | Number of network replications |
 | `lambda_values` | `"0.5,0.5"` | Diagonal entries of the true Lambda |
 | `k` | `NULL` | Infer K from the number of Lambda entries |
 | `target_node` | `1` | Node evaluated for Theorem 1 |
@@ -41,12 +41,19 @@ seed need not give identical coordinates for node 1.
 
 The current simulation optimization defaults are:
 
-| Model | `learning_rate` | `max_iter` | `tolerance` |
+| Model | Base step-size coefficient (`learning_rate`) | `max_iter` | `tolerance` |
 | --- | ---: | ---: | ---: |
 | Gaussian | 0.1 | 10000 | 0.001 |
 | Poisson | 0.02 | 60000 | 0.001 |
 | Logit | 1 | 40000 | 0.001 |
 | Probit | 1 | 40000 | 0.001 |
+
+`learning_rate` is a base coefficient. The matrix updates for U and Lambda
+multiply their gradients by `learning_rate / n` and `learning_rate / n^2`,
+respectively, before projection onto the constraint sets. For example, with
+`learning_rate = 1` and `n = 1000`, these coefficients are 0.001 and 0.000001.
+The stopping criterion uses the equivalent step `learning_rate / (2*n^2)`
+for the scaled `lambda_v` coordinates.
 
 Gaussian uses known noise standard deviation `sigma = 1`. The bounds
 `M_bound_U` and `M_bound_Lambda` are both 20. The current tolerance is 0.001
@@ -64,7 +71,7 @@ packages:
 install.packages(c("rmarkdown", "knitr", "doParallel", "foreach"))
 ```
 
-To run the current trial setting:
+To run the current YAML setting:
 
 ```r
 rmarkdown::render("simulations/node_inference.Rmd")
