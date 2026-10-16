@@ -62,6 +62,37 @@ for (expr in parse(text = r_code)) {
 }
 check(exists("run_pgd_network", reference, inherits = FALSE), "original PGD loaded safely")
 
+# Explicit eigen-direction removal: no tolerance, automatic rank cutoff, or
+# require_rank option. Known inverses test both public-source and Rmd helpers.
+for (implementation in c("source", "simulation")) {
+  pinv <- if (implementation == "source") api$.gfm_safe_pinv_psd else reference$safe_pinv_psd
+  check(identical(names(formals(pinv)), c("A", "n_drop")) &&
+        identical(formals(pinv)$n_drop, 0L),
+        paste(implementation, "pseudoinverse exposes only n_drop"))
+  tiny <- pinv(diag(c(2, 1e-16)))
+  equal(tiny[2, 2], 1e16,
+        paste(implementation, "retains a tiny strictly positive eigenvalue"))
+  equal(diag(c(2, 1e-16)) %*% tiny, diag(2),
+        paste(implementation, "full-rank inverse identity"))
+  equal(pinv(diag(c(4, 0, 2)), n_drop = 1L), diag(c(0.25, 0, 0.5)),
+        paste(implementation, "removes one explicitly specified null direction"))
+  equal(pinv(matrix(1, 2, 2), n_drop = 1L), matrix(0.25, 2, 2),
+        paste(implementation, "rank-one inverse in rotated coordinates"))
+  equal(pinv(diag(c(4, -0.01)), n_drop = 1L), diag(c(0.25, 0)),
+        paste(implementation, "drops the eigenvalue closest to zero"))
+  equal(pinv(diag(c(-2, 0)), n_drop = 2L), matrix(0, 2, 2),
+        paste(implementation, "dropping every direction returns zero"))
+  error(pinv(diag(c(1, 0))), "Remaining eigenvalues must be strictly positive")
+  error(pinv(diag(c(1, 0, 0)), n_drop = 1L),
+        "Remaining eigenvalues must be strictly positive")
+  error(pinv(diag(c(1, -0.1))), "Remaining eigenvalues must be strictly positive")
+  error(pinv(diag(c(0.01, -2)), n_drop = 1L),
+        "Remaining eigenvalues must be strictly positive")
+  for (invalid_drop in list(-1L, 3L, 0.5, numeric(), c(0L, 1L), Inf, NA_real_)) {
+    error(pinv(diag(2), n_drop = invalid_drop), "n_drop must be an integer")
+  }
+}
+
 # One observed-network fixture, not a Monte Carlo experiment.
 n <- 35L; K <- 2L
 U <- sqrt(n) * qr.Q(qr(matrix(rnorm(n * K), n, K)))
@@ -71,7 +102,7 @@ A[upper.tri(A)] <- rnorm(n * (n - 1) / 2, theta[upper.tri(theta)], 0.5)
 A <- A + t(A)
 dimnames(A) <- rep(list(paste0("node_", seq_len(n))), 2)
 before <- snapshot()
-fit <- fit_network(A, K, "gaussian", sigma = 0.5)
+fit <- fit_network(A, K, "gaussian", sigma = 0.5, U_star = U)
 check(identical(before, snapshot()), "fit has no RNG/options/search side effects")
 check(fit$diagnostics$converged && fit$debiasing$status == "success", "Gaussian fit and correction succeed")
 equal(crossprod(fit$U_hat) / n, diag(K), "fitted U normalization")
@@ -93,14 +124,25 @@ for (model in names(observations)) {
   equal(api$.gfm_run_pgd_network(B, config), reference$run_pgd_network(B, config),
         paste(model, "five-step PGD parity"))
   modern <- api$.gfm_calculate_debiasing_components(fit$U_hat, fit$Lambda_hat,
-                                                  fit$U_hat, config, B)
+                                                  U, config, B)
   old <- reference$calculate_debiasing_components(fit$U_hat, fit$Lambda_hat,
-                                                 fit$U_hat, config, B)
-  equal(modern, old, paste(model, "correction parity in same fitted frame"))
+                                                 U, config, B)
+  equal(modern, old, paste(model, "correction parity with true anchor"))
 }
 raw <- reference$run_pgd_network(A, fit$config)
-equal(raw$U_hat, fit$U_hat, "converged optimizer U parity")
-equal(raw$Lambda_hat, fit$Lambda_hat, "converged optimizer Lambda parity")
+aligned <- reference$rotate_estimator(raw$U_hat, raw$Lambda_hat, U)
+equal(aligned$U_q, fit$U_hat, "truth-aligned U matches simulation")
+equal(aligned$Lambda_q, fit$Lambda_hat, "truth-aligned Lambda matches simulation")
+equal(aligned$Q_transpose, fit$alignment$rotation, "alignment rotation matches simulation")
+expected_correction <- reference$calculate_debiasing_components(
+  aligned$U_q, aligned$Lambda_q, U, fit$config, A)
+equal(fit$correction$correction_total, expected_correction$correction_total,
+      "public correction uses true U, matching simulation")
+raw_only <- fit_network(A, K, "gaussian", sigma = 0.5, debias = FALSE)
+equal(raw_only$U_hat, raw$U_hat, "truth-free raw U matches optimizer")
+equal(raw_only$Lambda_hat, raw$Lambda_hat, "truth-free raw Lambda matches optimizer")
+equal(predict_network(raw_only), predict_network(fit), "alignment preserves predictions")
+check(raw_only$alignment$status == "not_requested", "raw-only fit needs no truth")
 
 # Verify adaptive parameter ordering beyond the K=2 simulation case.
 for (k in c(1L, 3L)) {
@@ -118,7 +160,7 @@ for (k in c(1L, 3L)) {
   Ak[upper.tri(Ak)] <- theta_k[upper.tri(theta_k)] + rnorm(276, sd = 0.25)
   Ak <- Ak + t(Ak)
   fk <- fit_network(Ak, k, "gaussian", sigma = 0.25,
-                    control = list(learning_rate = 0.02))
+                    control = list(learning_rate = 0.02), U_star = Uk)
   check(fk$diagnostics$converged && fk$debiasing$status == "success",
         paste("K", k, "full Gaussian estimation and correction"))
   check(identical(dim(fk$Lambda_debiased), c(k, k)) &&
@@ -128,12 +170,29 @@ for (k in c(1L, 3L)) {
 }
 Q <- matrix(c(cos(0.37), sin(0.37), -sin(0.37), cos(0.37)), 2)
 Ur <- fit$U_hat %*% Q; Lr <- t(Q) %*% fit$Lambda_hat %*% Q
-rotated <- api$.gfm_calculate_debiasing_components(Ur, Lr, Ur, fit$config, A)
+rotated <- api$.gfm_calculate_debiasing_components(Ur, Lr, U %*% Q, fit$config, A)
 Lr_db <- api$.gfm_lambda_matrix(api$.gfm_get_lambda_v(Lr) + rotated$correction_total, K)
 equal(Ur %*% Lr %*% t(Ur), fit$U_hat %*% fit$Lambda_hat %*% t(fit$U_hat),
       "raw signal is rotation invariant")
 equal(Ur %*% Lr_db %*% t(Ur), fit$U_hat %*% fit$Lambda_debiased %*% t(fit$U_hat),
       "corrected signal is rotation invariant")
+
+rotated_fit <- fit_network(A, K, "gaussian", sigma = 0.5, U_star = U %*% Q)
+equal(rotated_fit$U_hat, Ur, "public API aligns to rotated truth")
+equal(rotated_fit$Lambda_debiased, Lr_db, "public correction follows true coordinates")
+
+# Missing, malformed, or mismatched truth must fail before fitting.
+error(fit_network(A, K, "gaussian", 0.5), "requires the true U_star")
+for (invalid_truth in list(U[, 1, drop = FALSE], U[-1, ], as.data.frame(U), U * NA)) {
+  error(fit_network(A, K, "gaussian", 0.5, U_star = invalid_truth), "finite numeric n-by-K")
+}
+error(fit_network(A, K, "gaussian", 0.5, U_star = 2 * U), "crossprod")
+U_named <- U; rownames(U_named) <- rev(rownames(A))
+error(fit_network(A, K, "gaussian", 0.5, U_star = U_named), "same order")
+rownames(U_named) <- rownames(A)
+equal(api$.gfm_validate_U_star(U_named, A, K), U, "valid labeled truth retains values")
+check(identical(rownames(api$.gfm_validate_U_star(U_named, A, K)), rownames(A)),
+      "valid labeled truth retains row labels")
 
 # Public input and control failures must occur before expensive fitting.
 error(fit_network(as.data.frame(A), 2, "logit"), "numeric square")
@@ -159,11 +218,10 @@ for (bad in list(list(unknown = 1), list(max_iter = 1.5), list(tolerance = 0),
   error(fit_network(A, 2, "gaussian", 1, control = bad), "control|Unknown")
 }
 B <- A; diag(B) <- rep(c(NA, Inf, -999), length.out = n)
-fit_diagonal <- fit_network(B, K, "gaussian", sigma = 0.5, debias = FALSE)
+fit_diagonal <- fit_network(B, K, "gaussian", sigma = 0.5, debias = FALSE, U_star = U)
 equal(fit_diagonal$Lambda_hat, fit$Lambda_hat, "diagonal ignored before initialization")
 check(fit_diagonal$debiasing$status == "not_requested", "debias=FALSE status")
 error(api$.gfm_project_C_U_certified(diag(5)[, 1:2], sqrt(2)), "joint C_U projection unavailable")
-error(api$.gfm_safe_pinv_psd(diag(c(1, 0)), require_rank = TRUE), "unidentified directions")
 
 # CSV imports preserve values and node order; no fixture is written to project.
 plain_csv <- tempfile(fileext = ".csv"); named_csv <- tempfile(fileext = ".csv")
@@ -180,20 +238,22 @@ error(api$gfm_read_matrix(plain_csv), "symmetric")
 unlink(c(plain_csv, named_csv))
 
 nonconverged <- warnings_from(fit_network(A, K, "gaussian", 0.5,
-  control = list(max_iter = 1, tolerance = 1e-14)))
+  control = list(max_iter = 1, tolerance = 1e-14), U_star = U))
 check(length(nonconverged$messages) > 0 &&
       nonconverged$value$debiasing$status == "skipped", "nonconvergence retains raw fit and warns")
 error(predict_network(nonconverged$value), "converged fit")
 limited <- warnings_from(fit_network(A, K, "gaussian", 0.5,
-  control = list(max_debias_memory_mb = 0.0001)))
+  control = list(max_debias_memory_mb = 0.0001), U_star = U))
 check(length(limited$messages) > 0 && limited$value$debiasing$status == "failed" &&
       grepl("workspace", limited$value$debiasing$message), "memory guard retains raw fit and warns")
 equal(limited$value$Lambda_hat, fit$Lambda_hat, "memory guard leaves raw fit intact")
 error(predict_network(limited$value, debiased = TRUE), "unavailable")
-degenerate <- warnings_from(fit_network(matrix(0, 12, 12), 2, "gaussian", sigma = 1))
+degenerate <- warnings_from(fit_network(matrix(0, 12, 12), 2, "gaussian", sigma = 1,
+  U_star = sqrt(12) * qr.Q(qr(cbind(rep(1, 12), seq_len(12))))))
 check(length(degenerate$messages) > 0 && degenerate$value$diagnostics$converged &&
       degenerate$value$debiasing$status == "failed" &&
-      grepl("information", degenerate$value$debiasing$message),
+      grepl("Remaining eigenvalues must be strictly positive",
+            degenerate$value$debiasing$message),
       "zero network retains raw fit but rejects unidentified correction")
 check(is.null(degenerate$value$Lambda_debiased), "rank failure has no corrected estimate")
 prediction <- predict_network(fit, type = "link", debiased = TRUE)

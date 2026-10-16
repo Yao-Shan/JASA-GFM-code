@@ -91,8 +91,13 @@ for (params in list(yaml_params, runtime)) {
   check("output_dir" %in% names(params) && is.null(params$output_dir),
         "output directory is automatic by default")
 }
-equal(yaml_params$n, 1000, "YAML sample size")
-equal(yaml_params$n_sim, 1000, "YAML replication count")
+# Sample size and replication count are user-editable, not fixed test targets.
+for (field in c("n", "n_sim")) {
+  value <- yaml_params[[field]]
+  check(is.null(value) || (is.numeric(value) && length(value) == 1L &&
+        is.finite(value) && value >= 1 && value == floor(value)),
+        paste("YAML", field, "is a positive integer or NULL"))
+}
 equal(api$parse_lambda_values(yaml_params$lambda_values), c(0.5, 0.5),
       "YAML Lambda diagonal")
 equal(yaml_params$target_node, 1, "YAML target node")
@@ -101,9 +106,9 @@ models <- c("gaussian", "poisson", "bernoulli_logit", "bernoulli_probit")
 paper <- list(n = 1000L, k = 2L, n_sim = 1000L, lambda_vec = c(0.5, 0.5),
               target_node = 1L, design_seed = 238687L, replication_seed_base = 2000L)
 optimizer <- list(
-  gaussian = c(max_iter = 10000, learning_rate = 0.1, tolerance = 0.1),
-  poisson = c(max_iter = 60000, learning_rate = 0.02, tolerance = 1e-4),
-  bernoulli_logit = c(max_iter = 40000, learning_rate = 1, tolerance = 0.1),
+  gaussian = c(max_iter = 10000, learning_rate = 0.1, tolerance = 1e-3),
+  poisson = c(max_iter = 60000, learning_rate = 0.02, tolerance = 1e-3),
+  bernoulli_logit = c(max_iter = 40000, learning_rate = 1, tolerance = 1e-3),
   bernoulli_probit = c(max_iter = 40000, learning_rate = 1, tolerance = 1e-3)
 )
 config_from_params <- function(model, params) {
@@ -115,12 +120,29 @@ for (model in models) {
   equal(config[names(paper)], paper, paste(model, "bare defaults are valid paper settings"))
   equal(unlist(config[names(optimizer[[model]])]), optimizer[[model]],
         paste(model, "retains model-specific optimizer settings"))
-  for (params in list(yaml_params, runtime)) {
+  for (mode in c("render", "source")) {
+    params <- if (mode == "render") yaml_params else runtime
     effective <- config_from_params(model, params)
-    equal(effective[names(paper)], paper, paste(model, "render/source paper settings"))
+    expected <- paper
+    if (mode == "render") {
+      for (field in c("n", "n_sim")) {
+        if (!is.null(yaml_params[[field]])) expected[[field]] <- as.integer(yaml_params[[field]])
+      }
+    }
+    equal(effective[names(paper)], expected, paste(model, mode, "selected experiment settings"))
     check(identical(effective$truth_check_action, "warning"),
           paste(model, "render/source truth warning override"))
   }
+}
+
+# Both trial and paper sizes must override the same model defaults correctly.
+for (model in models) for (size in c(100L, 1000L)) {
+  selected <- yaml_params
+  selected$n <- size
+  selected$n_sim <- size
+  effective <- config_from_params(model, selected)
+  equal(effective[c("n", "n_sim")], list(n = size, n_sim = size),
+        paste(model, "explicit sample size and replication override", size))
 }
 
 # Dimension inference and explicit K must agree for supported experiment sizes.
