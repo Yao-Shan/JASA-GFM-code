@@ -3,10 +3,8 @@
 # See docs/user_guide.md for input conventions and interpretation.
 # Core formulas extracted from simulations/node_inference.Rmd on 2026-10-12.
 # Original simulation algorithms are preserved. Sourcing only defines functions.
-# The plug-in correction uses U_anchor = U_hat in the fitted coordinate frame.
-# Practical additions: validated inputs, explicit failures, resource guard,
-# and rank checks before accepting the correction. Defaults/formulas match
-# the original estimator on regular inputs. All functions use base R.
+# Debiasing requires supplied true U_star for alignment and the constraint anchor.
+# All functions use base R.
 
 # Resolve the four observation-model names and accepted aliases.
 .gfm_normalize_model_name <- function(model) {
@@ -48,42 +46,48 @@
   pmax(x, 0) + log1p(exp(-abs(x)))
 }
 
-# Invert positive information eigenvalues after removing constraint directions.
-.gfm_safe_pinv_psd <- function(
-  A, n_drop = 0L, rel_tol = 1e-10, negative_tol = 1e-7,
-  require_rank = FALSE
-) {
+# Drop n_drop eigen-directions, then invert the remaining positive eigenvalues.
+.gfm_safe_pinv_psd <- function(A, n_drop = 0L) {
   A <- .gfm_symmetrize(A)
   eg <- eigen(A, symmetric = TRUE)
   vals <- eg$values
   p <- length(vals)
-  if (any(!is.finite(vals))) stop("Non-finite information eigenvalue.")
-  if (n_drop < 0L || n_drop > p) stop("Invalid n_drop.")
-  if (p == 0L || n_drop == p) return(matrix(0, p, p))
-
-  scale <- max(abs(vals))
-  if (scale == 0) {
-    if (require_rank) stop("Projected node information is zero.")
+  
+  if (any(!is.finite(vals))) {
+    stop("Non-finite information eigenvalue.")
+  }
+  
+  if (
+    length(n_drop) != 1L ||
+    !is.finite(n_drop) ||
+    n_drop < 0L ||
+    n_drop > p ||
+    n_drop != floor(n_drop)
+  ) {
+    stop("n_drop must be an integer between 0 and the matrix dimension.")
+  }
+  
+  if (n_drop == p) {
     return(matrix(0, p, p))
   }
-  if (min(vals) < -negative_tol * scale) {
-    stop(sprintf(
-      "Matrix expected to be PSD has min eigenvalue %.4e (scale %.4e).",
-      min(vals), scale
-    ))
-  }
-
+  
+  # Remove the directions whose eigenvalues are closest to zero.
   keep <- rep(TRUE, p)
   if (n_drop > 0L) {
     keep[order(abs(vals))[seq_len(n_drop)]] <- FALSE
   }
-  keep <- keep & vals > rel_tol * scale
-  if (require_rank && sum(keep) != p - n_drop) {
-    stop("Projected node information has extra unidentified directions.")
+  
+  # Check positivity without a numerical tolerance.
+  if (any(vals[keep] <= 0)) {
+    stop("Remaining eigenvalues must be strictly positive.")
   }
+  
   vals_inv <- numeric(p)
   vals_inv[keep] <- 1 / vals[keep]
-  .gfm_symmetrize(eg$vectors %*% diag(vals_inv, p) %*% t(eg$vectors))
+  
+  .gfm_symmetrize(
+    eg$vectors %*% diag(vals_inv, p) %*% t(eg$vectors)
+  )
 }
 
 # Reject singular or ill-conditioned information matrices.
@@ -739,7 +743,7 @@
   }
   projected <- .gfm_symmetrize(PUU %*% SUU %*% PUU)
   projected_inv <- .gfm_safe_pinv_psd(
-    projected, n_drop = k^2, require_rank = TRUE
+    projected, n_drop = k^2
   )
   Seff <- .gfm_symmetrize(
     SLL - SLU %*% PUU %*% projected_inv %*% PUU %*% SUL
@@ -1008,6 +1012,48 @@ gfm_read_matrix <- function(file, node_names = FALSE) {
   out
 }
 
+# Validate supplied truth without changing its values or node order.
+.gfm_validate_U_star <- function(U_star, A, K) {
+  if (!is.matrix(U_star) || !is.numeric(U_star) ||
+      !identical(dim(U_star), c(nrow(A), as.integer(K))) ||
+      any(!is.finite(U_star))) {
+    stop("U_star must be a finite numeric n-by-K matrix of true latent coordinates.",
+         call. = FALSE)
+  }
+  labels <- rownames(U_star)
+  if (!is.null(labels) && (anyNA(labels) || any(!nzchar(labels)) || anyDuplicated(labels))) {
+    stop("U_star row names must be unique, nonempty node labels.", call. = FALSE)
+  }
+  if (!is.null(labels) && !is.null(rownames(A)) && !identical(labels, rownames(A))) {
+    stop("U_star and A must have node labels in the same order.", call. = FALSE)
+  }
+  if (max(abs(crossprod(U_star) / nrow(A) - diag(K))) > 1e-6) {
+    stop("U_star must satisfy crossprod(U_star) / n = I_K; supply the normalized true coordinates.",
+         call. = FALSE)
+  }
+  U_star
+}
+
+# Match the simulation's orthogonal alignment to the true latent coordinates.
+.gfm_rotate_estimator <- function(U_hat, Lambda_hat, U_star) {
+  n <- nrow(U_hat)
+  if (nrow(U_star) != n || ncol(U_hat) != ncol(U_star)) {
+    stop("Estimated and true coordinates must have the same dimensions.")
+  }
+  sv <- svd(crossprod(U_hat, U_star) / n)
+  Q_transpose <- sv$u %*% t(sv$v)
+  min_sv <- min(sv$d)
+  max_sv <- max(sv$d)
+  condition_number <- if (is.finite(min_sv) && min_sv > .Machine$double.eps * max_sv) {
+    max_sv / min_sv
+  } else Inf
+  list(U_q = U_hat %*% Q_transpose,
+       Lambda_q = .gfm_symmetrize(t(Q_transpose) %*% Lambda_hat %*% Q_transpose),
+       Q_transpose = Q_transpose,
+       alignment_min_singular_value = min_sv,
+       alignment_condition_number = condition_number)
+}
+
 #' Estimate a symmetric GFM from one observed network.
 #'
 #' A: numeric symmetric n-by-n matrix, with all off-diagonal edges observed.
@@ -1021,6 +1067,10 @@ gfm_read_matrix <- function(file, node_names = FALSE) {
 #'    All values are positive finite scalars; max_iter is an integer,
 #'    M_bound_U >= sqrt(K), and 0 < probability_eps < 0.5. See docs/user_guide.md.
 #' debias: whether to attempt the additive Lambda correction after convergence.
+#' U_star: true n-by-K latent coordinates, required when debias = TRUE.
+#'    Must satisfy crossprod(U_star)/n = I_K and follow A's node order.
+#'    When supplied, both U_hat and Lambda_hat are rotated to this frame,
+#'    including when debias = FALSE. No estimated-coordinate fallback is used.
 #'
 #' Returns: a gfm_fit list containing U_hat (n-by-K), Lambda_hat (K-by-K),
 #'    and, on correction success, Lambda_debiased (K-by-K). These are actual
@@ -1031,24 +1081,40 @@ gfm_read_matrix <- function(file, node_names = FALSE) {
 #'    A failed correction retains the raw fit; an invalid input or numerical
 #'    fitting failure raises an error. Check status before using the results.
 #'
-#' The correction uses U_anchor = U_hat in the fitted coordinate frame.
-#' U_hat is not corrected, and no truth-aligned confidence intervals are
-#' supplied. Fitting uses no RNG, data generation, or Monte Carlo repetitions.
-#' Example (A already observed): fit <- gfm_fit(A, K = 2, model = "logit")
-#' Example (known sigma): gfm_fit(A, K = 2, model = "gaussian", sigma = 0.5)
-gfm_fit <- function(A, K, model, sigma = NULL, control = list(), debias = TRUE) {
+#' The optimizer uses A, not U_star. Supplied truth is used afterwards for
+#' alignment and as U_anchor in the correction. U_hat is not bias-corrected.
+#' Lambda_star is not needed. No confidence intervals are supplied.
+#' Fitting uses no RNG, data generation, or Monte Carlo repetitions.
+#' Example: gfm_fit(A, K = 2, model = "logit", U_star = U_star)
+#' Example (truth unknown): gfm_fit(A, K = 2, model = "logit", debias = FALSE)
+gfm_fit <- function(A, K, model, sigma = NULL, control = list(), debias = TRUE,
+                    U_star = NULL) {
   if (!is.logical(debias) || length(debias) != 1L || is.na(debias)) {
     stop("debias must be TRUE or FALSE.", call. = FALSE)
   }
   A <- .gfm_validate_matrix(A)
   config <- .gfm_config(nrow(A), K, model, sigma, control)
   A <- .gfm_validate_matrix(A, config$model)
+  if (debias && is.null(U_star)) {
+    stop("Debiasing requires the true U_star; use debias = FALSE for estimation without truth.",
+         call. = FALSE)
+  }
+  if (!is.null(U_star)) U_star <- .gfm_validate_U_star(U_star, A, config$k)
   raw <- tryCatch(.gfm_run_pgd_network(A, config), error = function(e) {
     stop("GFM fitting failed: ", conditionMessage(e), call. = FALSE)
   })
   if (raw$convergence_code == 2L) {
     stop("GFM fitting failed: non-finite objective or projected-gradient residual.",
          call. = FALSE)
+  }
+  alignment <- list(status = "not_requested", rotation = NULL)
+  if (!is.null(U_star)) {
+    aligned <- .gfm_rotate_estimator(raw$U_hat, raw$Lambda_hat, U_star)
+    raw$U_hat <- aligned$U_q
+    raw$Lambda_hat <- aligned$Lambda_q
+    alignment <- list(status = "aligned_to_truth", rotation = aligned$Q_transpose,
+      min_singular_value = aligned$alignment_min_singular_value,
+      condition_number = aligned$alignment_condition_number)
   }
   labels <- rownames(A)
   coordinates <- paste0("component_", seq_len(config$k))
@@ -1071,9 +1137,9 @@ gfm_fit <- function(A, K, model, sigma = NULL, control = list(), debias = TRUE) 
     U_hat = raw$U_hat, Lambda_hat = raw$Lambda_hat, lambda_v_hat = vhat,
     Lambda_debiased = NULL, lambda_v_debiased = NULL, correction = NULL,
     efficient_information = NULL, config = config, node_labels = labels,
-    diagnostics = diagnostics,
+    diagnostics = diagnostics, alignment = alignment,
     debiasing = list(status = "not_requested", message = "Debiasing was not requested.",
-                     coordinate_frame = "fitted U_hat; plug-in U_anchor = U_hat")
+                     coordinate_frame = if (is.null(U_star)) "unaligned fitted frame" else "true U_star frame")
   ), class = "gfm_fit")
   if (!diagnostics$converged) {
     if (debias) {
@@ -1095,10 +1161,9 @@ gfm_fit <- function(A, K, model, sigma = NULL, control = list(), debias = TRUE) 
         memory_mb, config$max_debias_memory_mb
       ))
     }
-    # U_star is unavailable: compute the same correction formulas with the
-    # estimated frame as anchor. There is no oracle rotation in this API.
+    # Use the true constraint anchor after aligning both estimated parameters.
     ans <- .gfm_calculate_debiasing_components(
-      raw$U_hat, raw$Lambda_hat, U_anchor = raw$U_hat, config = config, A = A
+      raw$U_hat, raw$Lambda_hat, U_anchor = U_star, config = config, A = A
     )
     if (any(!is.finite(c(ans$correction_total, ans$Seff)))) {
       stop("Non-finite bias correction or efficient information.")
@@ -1124,7 +1189,7 @@ gfm_fit <- function(A, K, model, sigma = NULL, control = list(), debias = TRUE) 
   ))]
   result$diagnostics <- c(result$diagnostics, extra)
   result$debiasing$status <- "success"
-  result$debiasing$message <- "Additive Lambda correction computed in the fitted coordinate frame."
+  result$debiasing$message <- "Additive Lambda correction computed using true U_star in the truth-aligned frame."
   result
 }
 
