@@ -49,7 +49,7 @@ JASA-GFM-code/
 │   └── gfm_estimation.R       # Functions for one observed network
 ├── docs/
 │   ├── user_guide.md          # Inputs, controls, results, and interpretation
-│   └── simulation_guide.md    # Paper settings, small trial runs, and plotting
+│   └── simulation_guide.md    # Paper settings and small trial runs
 ├── plots/
 │   └── plot_figures.Rmd       # Figures from existing results; no fitting
 ├── simulations/
