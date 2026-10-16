@@ -10,12 +10,12 @@ For an existing observed network, see the [data analysis guide](user_guide.md).
 
 ## 1. Simulation settings
 
-The paper considers Gaussian, Poisson, Logit, and Probit models, with
-$n\in\{250,500,1000\}$ and
-$\Lambda^\star=\operatorname{diag}(0.5,0.5)$ or
-$\operatorname{diag}(0.7,-0.5)$. Each setting uses 1,000 network replications.
-Theorem 1 is evaluated at node 1; Theorem 2 concerns the global parameter
-$\Lambda$ and does not depend on the selected node.
+The paper considers Gaussian, Poisson, Logit, and Probit models with
+250, 500, or 1000 nodes. The true Lambda matrix is diagonal, with
+diagonal entries (0.5, 0.5) or (0.7, −0.5). Each setting uses
+1000 network replications. Theorem 1 is evaluated at node 1;
+Theorem 2 concerns the global parameter Lambda and does not
+depend on the selected node.
 
 The current YAML uses a small trial setting. For the main paper sample size
 and repetition count, change both `n` and `n_sim` to 1000:
