@@ -1,251 +1,169 @@
-# GFM estimation for one observed network
+# Single-network estimation guide
 
-The functions in [`R/gfm_estimation.R`](../R/gfm_estimation.R) fit the symmetric
-generalized factor model to an existing dataset and obtain a bias-corrected
-Lambda estimate. The original simulation algorithms and settings are preserved.
-The estimation interface uses only base R and does not generate data, repeat a
-Monte Carlo experiment, choose a seed, or write files.
+Use `R/gfm_estimation.R` to fit one network. It defines functions only and
+requires base R; it does not simulate data or run Monte Carlo repetitions.
 
-## Quick start
+**Lambda bias correction requires the true latent-coordinate matrix `U_star`.**
+When truth is unknown, use `debias = FALSE` to obtain ordinary estimates.
+The function does not substitute estimated coordinates for truth.
 
-Run these commands from the repository root, which contains `R/`, `docs/`,
-`simulations/`, and `tests/`:
+## 1. Prepare the inputs
+
+| Input | Requirement |
+| --- | --- |
+| `A` | Numeric, symmetric `n × n` network matrix with every off-diagonal entry observed. The diagonal is ignored. |
+| `K` | Latent dimension, an integer with `1 ≤ K < n`. All output dimensions adapt to it. |
+| `model` | `"logit"`, `"probit"`, `"poisson"`, or `"gaussian"`. |
+| `U_star` | Required for correction: the true `n × K` matrix for **all nodes**, in the same node order as `A`, satisfying `crossprod(U_star) / n = diag(K)`. |
+| `sigma` | Known positive noise standard deviation, required only for Gaussian observations. |
+
+Logit and Probit require binary edges; Poisson requires nonnegative integer
+counts; Gaussian accepts real-valued edges. Missing edges, directed networks,
+covariates, and a separate intercept are not supported.
+
+Run commands from the repository root. For CSV files without headers or row labels:
 
 ```r
 source("R/gfm_estimation.R")
 A <- gfm_read_matrix("network.csv")
-fit <- gfm_fit(A, K = 2, model = "logit", debias = TRUE)
+U_star <- as.matrix(read.csv("U_star.csv", header = FALSE))
+```
 
+For files with column headers and node labels in the first column:
+
+```r
+A <- gfm_read_matrix("network_named.csv", node_names = TRUE)
+U_star <- as.matrix(read.csv("U_star_named.csv", row.names = 1,
+                            check.names = FALSE))
+```
+
+When both inputs have node labels, their order must match exactly. Without
+labels, rows are matched by position. The function checks dimensions, finite
+values, and normalization (maximum absolute discrepancy `1e-6`); it does not
+reorder, center, or normalize `U_star`. Supply the true coordinates used by
+your model, not `U_hat` or an arbitrary normalized matrix. These numerical
+checks cannot establish whether supplied values are genuinely the truth.
+
+## 2. Fit the model
+
+With known true coordinates:
+
+```r
+fit <- gfm_fit(A, K = ncol(U_star), model = "logit", U_star = U_star)
+print(fit)
 fit$diagnostics
 fit$debiasing
-fit$Lambda_hat
-fit$Lambda_debiased
 ```
 
-Here `network.csv` contains your observed n-by-n network matrix, with no header
-or row labels. It is not a CSV of simulation replications or summary statistics.
-Choose `K` for your analysis; the function does not select the latent dimension.
-
-For a CSV whose first row contains column names and first column contains node
-names, use:
+Change `model` for the other observation types. For Gaussian data, also supply
+its known noise standard deviation, for example:
 
 ```r
-A <- gfm_read_matrix("network_with_labels.csv", node_names = TRUE)
+fit <- gfm_fit(A, K = ncol(U_star), model = "gaussian",
+               sigma = 0.5, U_star = U_star)
 ```
 
-The row and column labels must describe the same nodes in the same order.
-The reader and fitter do not automatically reorder nodes or fill missing edges.
-
-To fit another observation model:
+If `U_star` is unknown:
 
 ```r
-fit_probit <- gfm_fit(A, K = 2, model = "probit")
-fit_counts <- gfm_fit(count_matrix, K = 3, model = "poisson")
-fit_normal <- gfm_fit(weight_matrix, K = 2, model = "gaussian", sigma = 1)
+fit <- gfm_fit(A, K = 2, model = "logit", debias = FALSE)
 ```
 
-Use the matrix appropriate to each model. Gaussian `sigma` is the known noise
-standard deviation, must be supplied explicitly, and is not estimated. Its
-default is `NULL` so it cannot accidentally be treated as known and equal to 1.
+This returns ordinary estimates only. Requesting correction without `U_star`
+raises an error before optimization. The true `Lambda_star` is not needed
+for correction; it is needed only when evaluating estimation errors against
+truth in a simulation.
 
-## Data and model
+## 3. Read and save the results
 
-For $i < j$, the model has link parameter
-$\theta_{ij} = u_i^\top \Lambda u_j$, with $U^\top U = n I_K$ and symmetric
-$\Lambda$. The conditional response means are:
-
-| Model | Conditional mean | Observation values |
-| --- | --- | --- |
-| `logit` | $1 / (1 + \exp(-\theta_{ij}))$ | Binary 0/1 |
-| `probit` | $\Phi(\theta_{ij})$ | Binary 0/1 |
-| `gaussian` | $\theta_{ij}$, with variance $\sigma^2$ | Real numbers |
-| `poisson` | $\exp(\theta_{ij})$ | Nonnegative integer counts |
-
-`A` must be a numeric, square, symmetric matrix with complete finite
-observations off the diagonal. Both triangles must be supplied. The diagonal is
-ignored and internally set to zero; its entries may be zero, nonzero, or `NA`
-and never enter initialization or fitting. If row and column labels are both
-present, they must agree in the same order. The number of nodes `n` is inferred
-from `A`, and `1 <= K < n` is required. Symmetry is checked exactly; the reader
-never averages mismatched edges.
-
-This implementation assumes a complete undirected network and conditionally
-independent edges. It does not implement missing-edge handling, directed data,
-self-loop inference, covariates, or a separate intercept/degree-effect term.
-Check that these model assumptions suit the dataset before interpreting a fit.
-
-## Functions
-
-### Fit a network
-
-```r
-gfm_fit(A, K, model, sigma = NULL, control = list(), debias = TRUE)
-```
-
-Fits one network using spectral initialization and projected gradient descent.
-Model names include `logit`, `probit`, `gaussian`, and `poisson`. Dimensions adapt
-to `K`: Lambda is K-by-K and `lambda_v` has `K * (K + 1) / 2` entries.
-
-### Obtain fitted values
-
-```r
-gfm_predict(fit, type = "response", debiased = FALSE)
-```
-
-Returns a symmetric n-by-n matrix in the original node order. The response type
-returns conditional means; `type = "link"` returns $\theta_{ij}$. The diagonal
-is `NA` because self-loops are not modeled. Setting `debiased = TRUE` uses
-`Lambda_debiased` and requires a successful correction; it leaves `U_hat`
-unchanged. Both prediction types require a converged fit.
-
-These are fitted values for the observed nodes, not predictions for new nodes
-or uncertainty intervals. Correcting Lambda does not establish unbiased edge
-means.
-
-### Read a matrix CSV
-
-```r
-gfm_read_matrix(file, node_names = FALSE)
-```
-
-Reads a headerless numeric matrix CSV. With `node_names = TRUE`, the first row
-and first column instead supply column and row labels.
-
-## Optimizer controls
-
-The defaults match the original simulation optimizer:
-
-| Model | `max_iter` | `learning_rate` | `tolerance` |
-| --- | ---: | ---: | ---: |
-| `logit` | 40000 | 1 | 0.1 |
-| `probit` | 40000 | 1 | 0.001 |
-| `gaussian` | 10000 | 0.1 | 0.1 |
-| `poisson` | 60000 | 0.02 | 0.0001 |
-
-Additional defaults are `M_bound_U = 20`, `M_bound_Lambda = 20`,
-`probability_eps = 0.001`, and `max_debias_memory_mb = 2048`.
-Every control must be one positive finite number. `max_iter` must be an integer
-no larger than R's `.Machine$integer.max`; `probability_eps` must be less than
-0.5. Control names must be unique and recognized; misspelled names raise an
-error.
-
-```r
-fit <- gfm_fit(A, K = 2, model = "logit", control = list(
-  max_iter = 60000, learning_rate = 0.5, tolerance = 0.01
-))
-```
-
-`max_iter` limits optimization updates on this one dataset; it does not specify
-Monte Carlo repetitions. `learning_rate` controls the fixed update steps.
-`tolerance` is the threshold for the scaled projected-gradient residual, not a
-confidence level or a relative change in the objective.
-
-`M_bound_U` bounds each row norm of `U` and must be at least `sqrt(K)`.
-`M_bound_Lambda` bounds the absolute eigenvalues of Lambda. The joint U
-projection is certified only when its polar solution satisfies the row bound;
-an active bound that violates this certificate causes an explicit error. The
-implementation does not silently replace this projection with row clipping.
-`probability_eps` controls the Bernoulli spectral-initialization clipping, not a
-modification of the observed data or fitted likelihood.
-
-## Results and status
-
-The returned list includes:
-
-| Field | Meaning |
+| Output | Meaning |
 | --- | --- |
-| `U_hat`, `Lambda_hat`, `lambda_v_hat` | Raw parameter estimates in the fitted latent coordinate frame; not standardized simulation errors. |
-| `Lambda_debiased`, `lambda_v_debiased` | Bias-corrected Lambda estimates; `NULL` if correction is unavailable. |
-| `correction` | `correction_likelihood`, `correction_penalty`, and `correction_total`, all vectors in the `lambda_v` convention below. |
-| `efficient_information` | Information used by the correction, when available. |
-| `diagnostics` | Optimizer convergence and numerical diagnostic information. |
-| `debiasing$status`, `debiasing$message` | Whether correction succeeded and, if necessary, why it did not. |
-| `config`, `node_labels` | Resolved model/control settings and retained node identifiers. |
+| `fit$U_hat` | Estimated node coordinates, `n × K`. |
+| `fit$Lambda_hat` | Ordinary symmetric parameter estimate, `K × K`. |
+| `fit$Lambda_debiased` | Bias-corrected Lambda; `NULL` unless correction succeeds. |
+| `fit$diagnostics` | Optimizer convergence, iteration count, and numerical checks. |
+| `fit$debiasing` | Correction status, explanation, and coordinate frame. |
+| `fit$alignment` | Rotation to the supplied truth and alignment diagnostics; `not_requested` when truth is omitted. |
 
-Always inspect `diagnostics` and `debiasing` before using corrected estimates:
+These are parameter estimates, not standardized simulation errors. The
+`lambda_v_*` fields store diagonal entries divided by `sqrt(2)`, followed by
+upper-triangle off-diagonal entries in pair order `(1,2), (1,3), …`.
+
+Correction status is `success`, `failed`, `skipped` (fit did not converge), or
+`not_requested`. A correction failure retains the ordinary estimates and emits
+a warning. Inspect the status before using a corrected result.
 
 ```r
+saveRDS(fit, "gfm_fit.rds")
 if (identical(fit$debiasing$status, "success")) {
-  corrected_means <- gfm_predict(fit, debiased = TRUE)
+  write.csv(fit$Lambda_debiased, "Lambda_debiased.csv")
+  fitted_means <- gfm_predict(fit, debiased = TRUE)
 }
 ```
 
-Input errors and numerical fitting failures stop with an error. The correction
-status has the following values:
+`gfm_predict(fit)` uses ordinary Lambda; `type = "link"` returns the fitted
+linear predictor. Predictions require a converged fit, preserve node order,
+and have `NA` on the diagonal. No confidence intervals are returned.
 
-| `debiasing$status` | Meaning |
-| --- | --- |
-| `"success"` | The correction succeeded. |
-| `"skipped"` | The optimizer did not converge; the raw fit is returned with a warning. |
-| `"failed"` | Correction failed, including an information, dimension, or memory check; the raw fit is retained with a warning. |
-| `"not_requested"` | `debias = FALSE`, including when the raw optimizer has not converged. |
+## 4. Adjust the controls
 
-`diagnostics$convergence_code` is 0 for convergence and 1 for the iteration
-limit. A non-finite objective or residual is a fitting error rather than a
-usable returned fit. Do not treat a raw fit returned after a warning as a
-successfully corrected estimate; read the accompanying message.
+The model-specific optimizer defaults are:
 
-If a fit reaches `max_iter`, inspect `scaled_gradient` and the two residuals in
-`diagnostics`. A smaller `learning_rate` can help when fixed-step updates
-oscillate; a larger `max_iter` can help when progress is slow. Refit the same
-observed `A` with explicitly chosen controls. Do not loosen `tolerance` merely
-to force a successful status. Convergence is a stationarity check, not proof
-that this nonconvex problem has reached a global optimum. An information/rank
-failure can indicate that the chosen model or `K` is not identifiable from this
-network.
+| Model | `max_iter` | `learning_rate` | `tolerance` |
+| --- | ---: | ---: | ---: |
+| Logit | 40000 | 1 | 0.001 |
+| Probit | 40000 | 1 | 0.001 |
+| Gaussian | 10000 | 0.1 | 0.001 |
+| Poisson | 60000 | 0.02 | 0.001 |
 
-## Coordinate convention and interpretation
-
-The model is unchanged by an orthogonal rotation of `U` accompanied by the
-corresponding conjugation of Lambda. With real data, the true `U` is unavailable
-for the alignment used in the simulation study. This interface uses the fitted
-`U_hat` as the plug-in constraint anchor and reports correction in that frame.
-It does not reproduce the simulation's unobservable truth-aligned errors and
-does not provide coordinatewise confidence intervals with a claimed theorem
-guarantee for this plug-in frame. `U_hat` itself is not bias-corrected.
-
-`lambda_v` stores the K diagonal elements of Lambda divided by `sqrt(2)`,
-followed by the strict upper-triangular elements in row order: `(1,2)`, `(1,3)`,
-..., then `(2,3)`, ..., `(K-1,K)`. For `K = 2`, it is
-`(Lambda_11 / sqrt(2), Lambda_22 / sqrt(2), Lambda_12)`. The matrix-valued outputs
-convert this convention back to ordinary Lambda entries.
-
-The reported total correction is an additive adjustment:
+For example, to allow more iterations and tighten the stopping tolerance:
 
 ```r
-lambda_v_debiased = lambda_v_hat + correction_total
+fit <- gfm_fit(A, K = ncol(U_star), model = "logit", U_star = U_star,
+               control = list(max_iter = 60000L, tolerance = 0.01))
 ```
 
-The corrected Lambda is not reprojected onto the optimizer's spectral bound;
-its eigenvalues can exceed `M_bound_Lambda` after the adjustment.
+`max_iter` counts optimization updates for this one network, not simulated
+networks. If convergence fails, inspect the diagnostics before increasing it;
+a smaller `learning_rate` may help unstable updates. A smaller `tolerance`
+requests a stricter stopping criterion and can take longer.
 
-## Computation and saving
+Other defaults are `M_bound_U = 20`, `M_bound_Lambda = 20`,
+`probability_eps = 0.001`, and `max_debias_memory_mb = 2048`. The first two
+set parameter constraints (`M_bound_U ≥ sqrt(K)`); `probability_eps` controls
+Bernoulli probability clipping. Change them only when appropriate for the model.
 
-The implementation uses dense matrices. Fitting includes full spectral
-decompositions, and correction forms matrices of dimension nK-by-nK with
-cubic-cost linear algebra. The correction guard estimates workspace as sixteen
-dense (nK)-by-(nK) double arrays and compares it with `max_debias_memory_mb`.
-Despite the control's name, this limit is measured in MiB (1024^2 bytes).
-This estimate is not a guaranteed peak-memory bound. Check available resources
-before raising the limit; this is not a distributed or large-network solver.
-Use `debias = FALSE` when only the raw fit is needed.
+Correction uses dense matrices of dimension `n*K`. Its memory guard uses a
+planning estimate of `16 * 8 * (n*K)^2 / 1024^2` MiB, not a peak-memory guarantee.
+Raise the limit only if sufficient memory is available. The internal
+pseudoinverse helper removes exactly `n_drop` eigen-directions and requires all
+retained eigenvalues to be positive; it has no adjustable cutoff tolerance.
 
-Sourcing the file only defines functions. Fitting does not change the random
-seed, launch a simulation, create files, or start parallel Monte Carlo workers.
-Saving is an explicit, optional action:
+## 5. How truth enters the correction
 
-```r
-saveRDS(fit, "network_fit.rds")
-```
+Optimization uses `A` and the model settings. If `U_star` is supplied, the
+result is then aligned to its coordinates using the same Procrustes rotation
+as the simulation notebook:
 
-## Regression checks
+$$
+R = \arg\min_{Q^\top Q=I_K}\|\widehat U Q-U^\star\|_F,
+\qquad
+\widehat U_{\mathrm{a}}=\widehat U R,
+\qquad
+\widehat\Lambda_{\mathrm{a}}=R^\top\widehat\Lambda R.
+$$
 
-Run the supplied deterministic checks from the repository root:
+Both returned ordinary estimates use this aligned frame, even when
+`debias = FALSE` if truth was supplied. Alignment preserves the fitted signal
+`U_hat %*% Lambda_hat %*% t(U_hat)`. Without supplied truth, ordinary estimates
+remain in the optimizer's coordinate frame.
 
-```sh
-Rscript --vanilla tests/test_gfm.R
-```
+The correction evaluates the information and bias terms at the aligned
+estimates, with **`U_anchor = U_star`** in the constraint derivatives. It adds
+the resulting correction to aligned Lambda and does not bias-correct U.
+This follows the simulation's use of true coordinates; it is not a correction
+available from an observed network alone when those coordinates are unknown.
 
-The [test script](../tests/test_gfm.R) runs 80 checks and compares selected
-functions with the [simulation reference](../simulations/node_inference.Rmd).
-It does not run the Monte Carlo simulation pipeline.
+To verify the implementation locally, run `Rscript --vanilla tests/test_gfm.R`.
+The checks compare alignment and correction with the simulation formulas,
+cover all four likelihoods and adaptive K, and do not run Monte Carlo experiments.
