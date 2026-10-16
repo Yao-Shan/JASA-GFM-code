@@ -24,44 +24,37 @@ params:
   max_columns: 4
 ---
 
-This document reads existing simulation results. It does not simulate networks,
-fit models, or repeat Monte Carlo experiments. Open it in RStudio and **Knit to
-HTML** (the default), or choose **Knit to PDF** from the Knit menu. Plotting
-uses base R; knitting requires `rmarkdown` and `knitr`, and PDF output also needs
-a LaTeX installation providing XeLaTeX. The PDF report hides source code and
-embeds vector PDF figures. The HTML report retains expandable code and PNG previews.
-Paths are relative to this document, in the repository's `plots` directory.
+Read saved simulation results and draw QQ plots, sample-size comparisons,
+and optional all-node summaries. No model fitting or simulation is performed.
 
-Put the native `*_results.csv` and matching `*_config.rds` files under `data_dir`.
-Subdirectories are searched automatically; a single pair is sufficient. Keep
-different runs in separate directories: duplicate cases or incompatible seeds
-produce an error instead of silently combining results. `sample_sizes` optionally
-selects sample sizes; `main_n: null` selects the largest available sample size
-within each $K$ and $\Lambda$ group.
-Change `output_dir` for each collection if you want to preserve earlier figures.
+Set the parameters above, then **Knit to HTML** or **Knit to PDF** in RStudio.
+Knitting requires `rmarkdown` and `knitr`; PDF reports also require XeLaTeX.
+Paths are relative to this Rmd file.
 
-For optional all-node plots, set `all_nodes_file` to a native
-`component_summary.csv`, its run directory, or a YAML list of such paths. Each
-summary must retain its adjacent `config.rds`. Leave it `null` to produce the
-nodewise QQ plots alone. The older, aggregated plotting CSV without configuration
-files is not the input format of this portable document.
-When a native run directory contains both aggregate and per-case summaries,
-the per-case files and their matching configurations are used.
+| Parameter | Purpose |
+| --- | --- |
+| `data_dir` | Folder containing `*_results.csv` and matching `*_config.rds` files; subfolders are included. |
+| `output_dir` | Save figures and input records here. Use a new folder to preserve earlier output. |
+| `sample_sizes` | Select sample sizes, such as `[250, 500, 1000]`; `null` uses all available sizes. |
+| `main_n` | Sample size for the main QQ plots; `null` selects the largest in each parameter group. |
+| `max_columns` | Maximum panels per row; extra components or sample sizes continue on another figure. |
+| `all_nodes_file` | Optional all-node summary file, run folder, or list of paths; `null` skips these plots. |
 
-## 1. Read and check the saved results
+## 1. Read the results
 
-Theorem 1 has $K$ coordinates and Theorem 2 has $P=K(K+1)/2$ coordinates.
-Coordinates are plotted separately. The CSV columns `raw_lambda_*` and
-`debiased_lambda_*` contain **standardized estimation errors**, not parameter
-estimates. A row is retained only when its fit converged and every plotted
-standardized component and joint statistic is finite. The same retained rows
-are used for all nodewise plots of that case. The tables below disclose exclusions;
-they can affect how the diagnostic plots should be interpreted.
+Use one consistent experiment collection: duplicate settings or incompatible
+seeds, target nodes, or truth designs are rejected. Components are kept separate:
+$K$ for Theorem 1 and $P=K(K+1)/2$ for Theorem 2. The `raw_lambda_*` and
+`debiased_lambda_*` columns contain standardized errors, not parameter estimates.
+
+For each setting, all QQ plots use the same replications: converged fits with
+finite values for every displayed statistic. Exclusions are reported below;
+fewer than two retained replications produces an unavailable panel.
 
 ```{r setup, echo=knitr::is_html_output(), results='asis'}
 knitr::opts_chunk$set(echo = knitr::is_html_output(), message = FALSE, warning = TRUE)
 
-# HTML keeps full tables; PDF uses compact tables that can continue across pages.
+# Report formatting: HTML tables or multipage PDF tables.
 report_table <- function(d, caption = NULL, align = NULL, new_page = FALSE) {
   cat("\n\n")
   if (knitr::is_latex_output()) {
@@ -92,6 +85,7 @@ latex_escape <- function(x) {
     paste0(chars, collapse = "")
   }, character(1))
 }
+# Paths and shared style.
 data_dir <- params$data_dir
 figure_dir <- params$output_dir
 dir.create(figure_dir, recursive = TRUE, showWarnings = FALSE)
@@ -178,6 +172,7 @@ read_case <- function(path) {
                               finite = finite, included = keep))
 }
 
+# Load cases, check compatibility, and record retained replications.
 paths <- sort(list.files(data_dir, pattern = "_results[.]csv$", recursive = TRUE, full.names = TRUE))
 if (!length(paths)) stop("No *_results.csv files found in data_dir. Run a simulation first, or point data_dir to existing native results.")
 cases <- lapply(paths, read_case)
@@ -227,18 +222,12 @@ if (any(input_table$excluded > 0L)) warning("Some replications were excluded. Se
 if (any(input_table$planned != input_table$attempted)) warning("Saved row counts differ from planned repetitions for some cases. See plot_inputs.csv.")
 ```
 
-`used` counts successful fits with finite values for all displayed statistics.
-Cases with fewer than two retained replications are marked unavailable in their
-panels. Changing this plot document cannot repair failed fits. An input log and
-the inclusion decision for every original CSV row are saved beside the figures.
+## 2. Define the plot style
 
-## 2. Plotting functions
-
-For $R$ retained replications, the theoretical quantiles use
-$p_r=(r-1/2)/R$. Normal QQ plots use $\Phi^{-1}(p_r)$; joint QQ plots use
-$F^{-1}_{\chi^2_d}(p_r)$, with $d=K$ or $P$. Each retained replication appears
-as one open circle. The dashed line is $y=x$; no reference band is added and
-the saved statistics are never recentered or rescaled.
+QQ plots use open circles and the reference line $y=x$, without confidence
+bands. For $R$ retained replications, theoretical quantiles are evaluated at
+$p_r=(r-1/2)/R$, using the standard normal or the relevant chi-square distribution.
+Saved statistics are not recentered or rescaled.
 
 ```{r plotting-functions}
 theoretical <- function(R, df = NULL) {
@@ -267,6 +256,7 @@ qq_limits <- function(collection, model, columns, df = NULL) {
   list(x = safe_range(theoretical_values, !is.null(df)),
        y = safe_range(c(theoretical_values, empirical_values), !is.null(df)))
 }
+# Panel layout and labels.
 start_grid <- function(nr, nc, top_labels, row_labels,
                        xlab = "Standard normal quantiles", ylab = "Empirical quantiles",
                        legend_labels = NULL) {
@@ -316,7 +306,7 @@ qq_panel <- function(g, row, column, case, limits, columns, df = NULL, colors = 
   }
 }
 
-# Save the same drawing twice. PDF reports embed the vector file on its own page.
+# Export each figure as PDF and PNG, then include it in the report.
 figure_manifest <- list()
 save_figure <- function(name, caption, draw, nr, nc, height = NULL, width = NULL) {
   if (is.null(width)) width <- max(4.0, 1.02 + 1.65 * nc + 0.43 * (nc - 1L))
@@ -341,14 +331,13 @@ save_figure <- function(name, caption, draw, nr, nc, height = NULL, width = NULL
 groups <- split(cases, vapply(cases, function(x) group_key(x$config), character(1)))
 ```
 
-## 3. Nodewise and sample-size QQ plots
+## 3. Draw the QQ plots
 
-Each group fixes $K$ and $\Lambda$. Models occupy rows. Missing model/sample-size
-combinations are labelled unavailable; a full grid of simulation runs is not
-required. Components or sample sizes beyond `max_columns` continue on another
-figure. Raw Theorem 2 results are gray and debiased results are blue. Their
-overlay uses identical replications and axes. A shift in the raw curve need
-not indicate a failure of the bias-corrected theorem.
+Each $K$ and $\Lambda$ setting is plotted separately, with models in rows.
+Main plots show Theorem 1 components, Theorem 2 components (raw in gray,
+debiased in blue), and joint chi-square statistics. Sample-size comparisons
+show each component separately and use debiased results for Theorem 2.
+Missing combinations are labelled unavailable.
 
 ```{r qq-figures, results='asis'}
 for (group_id in seq_along(groups)) {
@@ -418,21 +407,21 @@ for (group_id in seq_along(groups)) {
 }
 ```
 
-## 4. Optional all-node diagnostics
+## 4. Draw all-node summaries (optional)
 
-Each box summarizes **nodes**, separately for one component: the nodewise mean
-or sample variance is calculated across the saved replications before the box
-is drawn. The native summary stores a standard deviation, so the variance is
-its square. A dot represents one node; slight deterministic horizontal offsets
-make overlapping dots visible. Nodes share simulated networks and are not
-independent observations. Reference lines are 0 for the mean and 1 for variance.
+Set `all_nodes_file` to a native `component_summary.csv`, its run folder, or a
+list of paths. Each summary needs an adjacent `config.rds` and complete results
+for every node and planned replication. If a run contains both aggregate and
+per-case files, the per-case summaries are used.
 
-The heatmaps retain each node's index. They display means, variances, and marginal
-95% coverage, with colors centered at 0, 1, and 0.95. Coverage is read from the
-summary rather than inferred from the mean and variance. All nodes are required;
-unavailable node summaries cause an error instead of quietly disappearing.
-Unlike the nodewise QQ selection, the native all-node summaries require all
-planned replications for every node. Incomplete all-node summaries are rejected.
+For each component, boxplots show the distribution of nodewise means and
+variances; each dot is one node. These summaries were computed across
+replications, and variance is read as `sd^2`. Nodes share simulated networks,
+so the dots are not independent observations.
+
+Heatmaps show every node at the largest available sample size in each group:
+mean, variance, and marginal 95% coverage, with reference values 0, 1, and 0.95.
+Coverage is read directly from the summary.
 
 ```{r all-node-data, results='asis'}
 all_nodes <- NULL
@@ -596,16 +585,17 @@ if (!is.null(all_nodes)) {
 }
 ```
 
-## 5. Output files
+## 5. Review the output
 
-Each displayed figure is saved as PDF and PNG in `output_dir`. The HTML embeds
-PNG previews; the PDF report embeds the vector PDF files, with one figure per page.
-`figure_manifest.csv` maps filenames to their settings;
-`plot_inputs.csv` and `row_selection.csv` document exactly which results were
-used. `all_node_inputs.csv` is added when optional all-node summaries are read.
-Repeated knitting replaces matching filenames. Use a new output directory when
-the input collection changes, so files from an earlier run are not mistaken for
-current results.
+Figures are saved as PDF and PNG in `output_dir`. The report displays PNG
+previews in HTML or vector figures in PDF. Matching filenames are overwritten.
+
+| Record | Contents |
+| --- | --- |
+| `figure_manifest.csv` | Figure filenames and settings. |
+| `plot_inputs.csv` | Input files, experiment settings, and replication counts. |
+| `row_selection.csv` | Inclusion decision for each input row. |
+| `all_node_inputs.csv` | All-node input records, when supplied. |
 
 ```{r output-manifest, results='asis'}
 if (length(figure_manifest)) {
