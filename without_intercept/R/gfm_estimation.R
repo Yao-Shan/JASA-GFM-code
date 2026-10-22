@@ -1,10 +1,6 @@
-# GFM estimation for one observed network (base R only).
-# Public interface: gfm_read_matrix(), gfm_fit(), gfm_predict().
-# See docs/user_guide.md for input conventions and interpretation.
-# Core formulas extracted from simulations/node_inference.Rmd on 2026-10-12.
-# Original simulation algorithms are preserved. Sourcing only defines functions.
-# Debiasing requires supplied true U_star for alignment and the constraint anchor.
-# All functions use base R.
+# Fit one observed network using base R; sourcing only defines functions.
+# Public API: gfm_read_matrix(), gfm_fit(), gfm_predict().
+# Debiasing requires true U_star. See docs/user_guide.md.
 
 # Resolve the four observation-model names and accepted aliases.
 .gfm_normalize_model_name <- function(model) {
@@ -128,9 +124,8 @@
   )
 }
 
-# Vectorize Lambda using diagonal/sqrt(2), then row-wise upper pairs.
-# The result has d = K(K+1)/2 entries; this is a parameter vector, not a
-# standardized error. For K=2: (Lambda_11/sqrt(2), Lambda_22/sqrt(2), Lambda_12).
+# Vectorize Lambda: diagonal/sqrt(2), then upper entries by row.
+# These K(K+1)/2 coordinates are parameters, not standardized errors.
 .gfm_get_lambda_v <- function(Lambda) {
   k <- nrow(Lambda)
   out <- diag(Lambda) / sqrt(2)
@@ -171,11 +166,8 @@
     stop("C_U is infeasible: require n >= k and M_bound_U >= sqrt(k).")
   }
 
-  # The scaled polar factor is a global Euclidean projection onto
-  # {U: U^T U = n I_k}. If it also satisfies the row-norm bound, it is
-  # therefore a global projection onto the intersection C_U. When the row
-  # bound is active, clipping would destroy U^T U = n I_k; fail explicitly
-  # instead of silently replacing the theoretical joint projection.
+  # The polar projection is valid only if it also meets the row bound.
+  # Row clipping would break U^T U = n I_K, so a violation raises an error.
   decomposition <- svd(Z, nu = k, nv = k)
   U <- sqrt(n) * decomposition$u[, seq_len(k), drop = FALSE] %*%
     t(decomposition$v[, seq_len(k), drop = FALSE])
@@ -396,9 +388,7 @@
 
 # Compute realized edge information, including outcome dependence for probit.
 .gfm_observed_information_matrix <- function(theta, config, A = NULL) {
-  # For Gaussian, logit, and Poisson, the observed negative Hessian is
-  # identical to the expected Fisher information.  Probit is different:
-  # its observed curvature depends on the realized binary outcome.
+  # Only probit has outcome-dependent observed information.
   if (config$model != "bernoulli_probit") {
     return(.gfm_expected_derivative_terms(theta, config)$information)
   }
@@ -416,8 +406,7 @@
   information <- ifelse(A > 0.5, information_y1, information_y0)
   dim(information) <- dim(theta)
 
-  # Both expressions are nonnegative analytically.  Remove only negative
-  # roundoff caused by tail-ratio cancellation.
+  # Clip negative roundoff; both expressions are analytically nonnegative.
   pmax(information, 0)
 }
 
@@ -543,10 +532,8 @@
       config$M_bound_Lambda
     )
 
-    # On the orthogonality-constrained parameter space, the raw Euclidean
-    # gradient need not vanish at the optimum. The mapping must be divided by
-    # the effective steps actually used by the code: eta_U = lr/n and, under
-    # the paper's lambda_v parameterization, eta_lambda_v = lr/(2 n^2).
+    # Scale projected residuals by eta_U = lr/n and eta_lambda_v = lr/(2*n^2).
+    # The unconstrained gradient need not vanish at a constrained optimum.
     residuals <- .gfm_projected_gradient_mapping_components(
       U_hat, U_next, Lambda_hat, Lambda_next,
       config$learning_rate, n
@@ -567,8 +554,7 @@
     }
   }
 
-  # The final update can itself cross the tolerance. Re-evaluate at the
-  # returned iterate so a max-iteration exit is classified correctly.
+  # Recheck the returned iterate: the final update may satisfy tolerance.
   if (convergence_code == 1L) {
     final_grads <- .gfm_calculate_gradient_network(U_hat, Lambda_hat, A, config)
     final_U_projection <- .gfm_project_C_U_certified(
@@ -627,10 +613,8 @@
   )
 }
 
-# Build normalization and rotation-constraint derivatives in the chosen frame.
-# DUG is (nK)-by-K^2. Rows stack U node by node, not R's column-major order.
-# Columns cover K diagonal normalization constraints, K(K-1)/2 cross-products,
-# and K(K-1)/2 rotation constraints anchored at U_anchor.
+# Build normalization and U_anchor rotation derivatives.
+# DUG is (nK)-by-K^2, with U stacked by node.
 .gfm_build_D_UG <- function(U, U_anchor) {
   n <- nrow(U)
   k <- ncol(U)
@@ -664,19 +648,15 @@
   DUG
 }
 
-# Assemble observed information and the exact nuisance projector.
-# SUU, SUL, and SLL have sizes (nK)x(nK), (nK)xd, and dxd, where
-# d = K(K+1)/2. PUU projects onto allowed U directions. Seff is the dxd
-# Schur complement after accounting for those directions. Expected KxK
-# node blocks are stored separately for the bias formulas.
+# Build observed information and efficient Lambda information Seff.
+# PUU projects onto allowed U directions; expected node blocks feed bias terms.
 .gfm_build_information_blocks <- function(U, Lambda, U_anchor, config, A = NULL) {
   n <- nrow(U)
   k <- ncol(U)
   d <- k * (k + 1L) / 2L
   Theta <- U %*% Lambda %*% t(U)
   diag(Theta) <- 0
-  # Match the PDF's realized negative-Hessian information blocks. For probit
-  # this uses the observed outcomes; for the other models it equals Fisher.
+  # Use observed edge information, including probit's outcome dependence.
   V <- .gfm_observed_information_matrix(Theta, config, A)
   V_expected <- .gfm_expected_derivative_terms(Theta, config)$information
   diag(V) <- 0
@@ -722,9 +702,8 @@
   DGU_DUG_inverse <- .gfm_ordinary_inverse_pd(
     DGU_DUG, "D_GU D_UG nuisance Gram matrix"
   )
-  # Finite-sample nuisance projector. Do not replace D_GU D_UG by n I:
-  # Pi_nui = D_UG (D_GU D_UG)^+ D_GU. The numerical-rank check above makes
-  # the Moore-Penrose inverse equal to the ordinary inverse used here.
+  # Exact projector: D_UG (D_GU D_UG)^+ D_GU; do not substitute n I.
+  # The rank check permits an ordinary inverse here.
   Pi_nui <- .gfm_symmetrize(
     DUG %*% DGU_DUG_inverse$inverse %*% DGU
   )
@@ -769,10 +748,8 @@
   )
 }
 
-# Evaluate the original B1, BM and BP bias formulas with expected node information.
-# B1 uses expected third derivatives; BM uses E[ell' * ell'']; BP supplies
-# the normalization-related term. U vectors stack nodes and have length nK;
-# Lambda vectors use lambda_v and have length d = K(K+1)/2.
+# Compute B1, BM and BP from expected node information and edge moments.
+# U is stacked by node; Lambda uses the scaled lambda_v coordinates.
 .gfm_calculate_bias_terms <- function(U, Lambda, expected_blocks, config) {
   n <- nrow(U)
   k <- ncol(U)
@@ -781,8 +758,7 @@
   diag(Theta) <- 0
   terms <- .gfm_expected_derivative_terms(Theta, config)
   W <- U %*% Lambda
-  # A feasible data analysis must report nonidentifiability, not hide it in
-  # a zero-eigenvalue pseudoinverse. For regular blocks this is unchanged.
+  # Require identifiable node blocks before computing the correction.
   for (i in seq_along(expected_blocks)) {
     .gfm_assert_positive_definite(
       expected_blocks[[i]], sprintf("Expected information for node %d", i)
@@ -827,10 +803,8 @@
   )
 }
 
-# Compute additive Lambda corrections with an explicitly supplied coordinate anchor.
-# Both returned corrections use lambda_v units. Their sum is ADDED to the
-# raw vector; converting to a KxK matrix restores the diagonal sqrt(2) factor.
-# U is held fixed here. This function does not construct confidence intervals.
+# Compute additive corrections in lambda_v units using the supplied anchor.
+# Keep U fixed; restore diagonal sqrt(2) scaling when converting to a matrix.
 .gfm_calculate_debiasing_components <- function(
   U, Lambda, U_anchor, config, A = NULL
 ) {
@@ -842,8 +816,7 @@
   Seff_inverse <- .gfm_ordinary_inverse_pd(
     info$Seff, "Theorem 2 efficient information"
   )
-  # The B1/BM/BP formulas use the expected node-information blocks; keep
-  # those separate from the observed Hessian blocks used in Seff above.
+  # Bias terms use expected node information; Seff uses observed information.
   bias <- .gfm_calculate_bias_terms(U, Lambda, info$expected_blocks, config)
 
   core <- (bias$B1L - bias$BML) -
@@ -879,8 +852,7 @@
   )
 }
 
-# ---------------------- Practical public interface ----------------------
-
+# Practical public interface
 # Check one finite scalar; used to reject malformed controls before fitting.
 .gfm_positive_scalar <- function(x, name, integer = FALSE) {
   if (!is.numeric(x) || length(x) != 1L || !is.finite(x) || x <= 0 ||
@@ -966,15 +938,10 @@
   A
 }
 
-#' Read one observed network from a CSV file.
-#'
-#' file: CSV path accepted by read.csv(). By default, all cells are data.
-#' node_names: TRUE when the first row and first column contain node labels.
-#' Returns: a numeric symmetric n-by-n matrix with its diagonal set to zero.
-#' Off-diagonal entries must be finite; labels must agree in the same order.
-#' This checks the matrix structure; gfm_fit() checks the chosen model's domain.
+#' Read a network CSV as a symmetric matrix with zero diagonal.
+#' Set node_names = TRUE for labels in the first row and column.
+#' Off-diagonal entries must be finite; row/column labels must match.
 #' Example: A <- gfm_read_matrix("network.csv")
-#' Example with labels: A <- gfm_read_matrix("network.csv", node_names = TRUE)
 gfm_read_matrix <- function(file, node_names = FALSE) {
   if (!is.logical(node_names) || length(node_names) != 1L || is.na(node_names)) {
     stop("node_names must be TRUE or FALSE.", call. = FALSE)
@@ -1054,39 +1021,20 @@ gfm_read_matrix <- function(file, node_names = FALSE) {
        alignment_condition_number = condition_number)
 }
 
-#' Estimate a symmetric GFM from one observed network.
+#' Fit one observed symmetric network; all dimensions adapt to K < n.
+#' A: fully observed off-diagonal edges; the diagonal is ignored.
+#' model: logit/probit (binary), poisson (counts), or gaussian (known sigma).
+#' control: named optimizer/resource overrides; see docs/user_guide.md.
+#' U_star: true n-by-K coordinates in A's node order, with U_star' U_star = n I.
+#' Required for debias = TRUE; whenever supplied, it aligns both estimates.
+#' Fitting uses only A; truth anchors the subsequent alignment and correction.
 #'
-#' A: numeric symmetric n-by-n matrix, with all off-diagonal edges observed.
-#'    The diagonal is ignored, including NA. Node order is retained.
-#' K: positive integer smaller than n; all dimensions adapt to K.
-#' model: "logit", "probit", "gaussian", or "poisson" (aliases also accepted).
-#'    Bernoulli models require 0/1 edges; Poisson requires nonnegative counts.
-#' sigma: known positive Gaussian noise standard deviation; required for
-#'    Gaussian and otherwise omitted. The function does not estimate sigma.
-#' control: uniquely named list overriding optimizer or resource defaults.
-#'    All values are positive finite scalars; max_iter is an integer,
-#'    M_bound_U >= sqrt(K), and 0 < probability_eps < 0.5. See docs/user_guide.md.
-#' debias: whether to attempt the additive Lambda correction after convergence.
-#' U_star: true n-by-K latent coordinates, required when debias = TRUE.
-#'    Must satisfy crossprod(U_star)/n = I_K and follow A's node order.
-#'    When supplied, both U_hat and Lambda_hat are rotated to this frame,
-#'    including when debias = FALSE. No estimated-coordinate fallback is used.
-#'
-#' Returns: a gfm_fit list containing U_hat (n-by-K), Lambda_hat (K-by-K),
-#'    and, on correction success, Lambda_debiased (K-by-K). These are actual
-#'    parameter estimates, not standardized Monte Carlo errors. lambda_v
-#'    outputs have K(K+1)/2 entries in the scaled convention documented above.
-#'    diagnostics reports convergence; debiasing$status is "success",
-#'    "failed", "skipped" (requested but unconverged), or "not_requested".
-#'    A failed correction retains the raw fit; an invalid input or numerical
-#'    fitting failure raises an error. Check status before using the results.
-#'
-#' The optimizer uses A, not U_star. Supplied truth is used afterwards for
-#' alignment and as U_anchor in the correction. U_hat is not bias-corrected.
-#' Lambda_star is not needed. No confidence intervals are supplied.
-#' Fitting uses no RNG, data generation, or Monte Carlo repetitions.
-#' Example: gfm_fit(A, K = 2, model = "logit", U_star = U_star)
-#' Example (truth unknown): gfm_fit(A, K = 2, model = "logit", debias = FALSE)
+#' Returns U_hat, Lambda_hat, diagnostics, and Lambda_debiased on success.
+#' These are estimates; lambda_v outputs use the scaled coordinates above.
+#' Check diagnostics$converged and debiasing$status before using a correction.
+#' An unconverged fit skips debiasing; a failed correction retains the raw fit.
+#' U_hat is not debiased, and no confidence intervals are returned.
+#' With unknown truth: gfm_fit(A, K = 2, model = "logit", debias = FALSE).
 gfm_fit <- function(A, K, model, sigma = NULL, control = list(), debias = TRUE,
                     U_star = NULL) {
   if (!is.logical(debias) || length(debias) != 1L || is.na(debias)) {
@@ -1129,8 +1077,7 @@ gfm_fit <- function(A, K, model, sigma = NULL, control = list(), debias = TRUE,
     "1" = "Maximum iterations reached before convergence.",
     "2" = "Non-finite objective or projected-gradient residual."
   )
-  # A planning estimate, not an exact peak-RSS guarantee. Additional n^2
-  # matrices, spectral initialization, R copies and LAPACK workspace cost more.
+  # Workspace estimate; actual peak memory also includes copies and solvers.
   memory_mb <- 16 * 8 * (as.double(config$n) * config$k)^2 / 1024^2
   diagnostics$estimated_debias_workspace_mb <- memory_mb
   result <- structure(list(
@@ -1150,7 +1097,7 @@ gfm_fit <- function(A, K, model, sigma = NULL, control = list(), debias = TRUE,
     return(result)
   }
   if (!debias) return(result)
-  # Defer these checks until after estimation so failure still returns the fit.
+  # Preserve the raw fit if correction checks fail.
   correction <- tryCatch({
     edges <- as.double(config$n) * (config$n - 1) / 2
     parameters <- config$n * config$k - config$k * (config$k - 1) / 2
@@ -1193,17 +1140,11 @@ gfm_fit <- function(A, K, model, sigma = NULL, control = list(), debias = TRUE,
   result
 }
 
-#' Compute fitted edge values for the observed nodes.
-#'
-#' fit: converged result from gfm_fit().
-#' type: "response" for conditional edge means or "link" for U Lambda U'.
-#' debiased: TRUE uses Lambda_debiased and requires successful correction;
-#'    FALSE uses Lambda_hat. Both keep U_hat unchanged.
-#' Returns: a symmetric n-by-n matrix in the original node order, with NA
-#'    on the diagonal. This supplies neither new-node predictions nor
-#'    uncertainty intervals; corrected Lambda does not imply unbiased means.
-#' Example: fitted_means <- gfm_predict(fit)
-#' Example: corrected_means <- gfm_predict(fit, debiased = TRUE)
+#' Predict observed-node edges from a converged gfm_fit result.
+#' type = "response" returns means; "link" returns U Lambda U'.
+#' debiased = TRUE requires successful correction and keeps U_hat fixed.
+#' Returns a symmetric matrix in the original node order, with NA diagonal.
+#' No prediction intervals or new-node predictions are provided.
 gfm_predict <- function(fit, type = c("response", "link"), debiased = FALSE) {
   if (!inherits(fit, "gfm_fit")) stop("fit must be returned by gfm_fit().", call. = FALSE)
   type <- match.arg(type)
@@ -1224,10 +1165,7 @@ gfm_predict <- function(fit, type = c("response", "link"), debiased = FALSE) {
   out
 }
 
-#' Print a compact fit summary.
-#' x: result from gfm_fit(); ... is accepted for the print generic.
-#' Displays the model, dimensions, convergence and correction status, then
-#' returns x invisibly. Example: print(fit).
+#' Print model, dimensions and fit/correction status; return x invisibly.
 print.gfm_fit <- function(x, ...) {
   cat(sprintf("GFM: %s, n = %d, K = %d\n", x$config$model, x$config$n, x$config$k))
   cat("Converged:", x$diagnostics$converged, "| iterations:", x$diagnostics$n_iter, "\n")

@@ -64,7 +64,7 @@ networks. Models run sequentially, using up to seven workers within each model.
 
 ## 2. Reproduce the experiments
 
-Run the examples from the repository root in RStudio. Install any missing
+Run the examples from the `without_intercept/` folder in RStudio. Install any missing
 packages:
 
 ```r
@@ -119,6 +119,7 @@ Once simulation results are available, run:
 rmarkdown::render(
   "plots/plot_figures.Rmd",
   params = list(
+    run_plots = TRUE,
     data_dir = "../data/node1",
     output_dir = "../data/figures"
   )
@@ -127,9 +128,10 @@ rmarkdown::render(
 
 This creates componentwise normal QQ plots, joint chi-square QQ plots, and
 sample-size comparisons for the available settings. Figures are saved as PDF
-and PNG. It reads existing results and does not rerun the simulations.
+and PNG; Theorem 2 QQ plots show debiased statistics only. No simulations
+are rerun. The default `run_plots: false` displays the guide without reading data.
 Paths in `params` are relative to the Rmd file: here `../data/node1` refers
-to `data/node1` at the repository root. Absolute paths also work.
+to `without_intercept/data/node1` in the combined repository. Absolute paths also work.
 
 Keep one consistent experiment collection in `data_dir`; do not mix duplicate
 runs or different seeds. Plots retain successful replications with finite
@@ -142,17 +144,37 @@ must contain complete native `component_summary.csv` files and matching
 `config.rds` files. These summaries are generated separately; the single-node
 notebook does not produce them. Leave this option unset for single-node QQ plots.
 
+### Individual QQ plots and Lambda histograms
+
+Use `plots/plot_individual.Rmd` for the LaTeX figure style. Set `run_plots: true`
+and `data_dir` to your saved results. Defaults select `n: 1000`, all four models,
+and all available Lambda settings. Change `n`, `models`, `lambda_settings`, or
+`histogram_bins` to select another case. PDFs need `pdflatex` with `lmodern`;
+PNG previews additionally need `pdftoppm`.
+
+`figure_types` selects `qq`, `hist_estimates`, and/or `hist_errors`. The two
+histograms compare raw and debiased Lambda entries, before or after subtracting
+truth, using the same replications and bins. They use saved unstandardized
+errors in the truth-aligned coordinate frame ($\Lambda_q$), restoring diagonal
+entries from `lambda_v` units by multiplying by $\sqrt{2}$. Standardized QQ
+columns are never used as estimates.
+
+Existing output is preserved in a new numbered run folder. Complete successful
+runs are required by default; `require_complete: false` allows explicit
+filtering and writes every retained/excluded row to `records/row_selection.csv`.
+For R scripts, source `plots/plot_individual.R` and call `gfm_plot_individual()`
+with the same parameters (without `run_plots`).
+
 ### Numbers for summary tables
 
 Tables report each standardized component separately as **mean (sample
-variance)**. Use `var()`, not `sd()`; notebook QQ titles report standard
-deviations. The following summarizes one result CSV using the same row
+variance)**. Use `var()`, not `sd()`. The following summarizes one result CSV using the same row
 selection as the plotting notebook:
 
 ```r
 csv <- "path/to/your_results.csv"  # Replace with an actual result file.
 d <- read.csv(csv)
-components <- grep("^(stat_U_|raw_lambda_|debiased_lambda_)",
+components <- grep("^(stat_U_|debiased_lambda_)",
                    names(d), value = TRUE)
 required <- c(components, "chi_sq_U", "chi_sq_debiased_lambda")
 keep <- d$convergence_code == 0 &
@@ -175,7 +197,7 @@ not export the paper's formatted LaTeX tables.
 
 ### Choose HTML or PDF
 
-Both notebooks default to HTML. Use **Knit to PDF** in RStudio, or add
+The simulation and summary-plot notebooks default to HTML. Use **Knit to PDF** in RStudio, or add
 `output_format = "pdf_document"` to `render()`; PDF output requires XeLaTeX.
 For a PDF of existing figures, use this option with `plots/plot_figures.Rmd`.
 To produce a simulation truth-check PDF without running network replications:

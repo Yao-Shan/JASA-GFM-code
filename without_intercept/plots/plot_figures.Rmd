@@ -16,7 +16,8 @@ header-includes:
   - \usepackage{longtable}
   - \usepackage{booktabs}
 params:
-  data_dir: "../data/node1"
+  run_plots: false
+  data_dir: null
   output_dir: "../data/figures"
   all_nodes_file: null
   sample_sizes: null
@@ -25,20 +26,30 @@ params:
 ---
 
 Read saved simulation results and draw QQ plots, sample-size comparisons,
-and optional all-node summaries. No model fitting or simulation is performed.
+and optional all-node summaries. Theorem 2 QQ plots show debiased results only.
+For separate LaTeX figures and Lambda histograms, use `plot_individual.Rmd`.
+No model fitting or simulation is performed.
 
-Set the parameters above, then **Knit to HTML** or **Knit to PDF** in RStudio.
+Set `data_dir` and `run_plots: true`, then **Knit to HTML** or **Knit to PDF**
+in RStudio. The default only displays this guide.
 Knitting requires `rmarkdown` and `knitr`; PDF reports also require XeLaTeX.
 Paths are relative to this Rmd file.
 
 | Parameter | Purpose |
 | --- | --- |
 | `data_dir` | Folder containing `*_results.csv` and matching `*_config.rds` files; subfolders are included. |
-| `output_dir` | Save figures and input records here. Use a new folder to preserve earlier output. |
+| `output_dir` | Save figures and input records here. Nonempty output creates a new `run_001` folder. |
 | `sample_sizes` | Select sample sizes, such as `[250, 500, 1000]`; `null` uses all available sizes. |
 | `main_n` | Sample size for the main QQ plots; `null` selects the largest in each parameter group. |
 | `max_columns` | Maximum panels per row; extra components or sample sizes continue on another figure. |
 | `all_nodes_file` | Optional all-node summary file, run folder, or list of paths; `null` skips these plots. |
+
+```{r run-policy, include=FALSE}
+if (!is.logical(params$run_plots) || length(params$run_plots) != 1L || is.na(params$run_plots))
+  stop("run_plots must be TRUE or FALSE.")
+if (isTRUE(params$run_plots) && is.null(params$data_dir)) stop("Set data_dir to saved results.")
+knitr::opts_chunk$set(eval = isTRUE(params$run_plots))
+```
 
 ## 1. Read the results
 
@@ -54,7 +65,7 @@ fewer than two retained replications produces an unavailable panel.
 ```{r setup, echo=knitr::is_html_output(), results='asis'}
 knitr::opts_chunk$set(echo = knitr::is_html_output(), message = FALSE, warning = TRUE)
 
-# Report formatting: HTML tables or multipage PDF tables.
+# Format tables for HTML or PDF.
 report_table <- function(d, caption = NULL, align = NULL, new_page = FALSE) {
   cat("\n\n")
   if (knitr::is_latex_output()) {
@@ -63,7 +74,7 @@ report_table <- function(d, caption = NULL, align = NULL, new_page = FALSE) {
       d, format = "latex", longtable = TRUE, booktabs = TRUE,
       row.names = FALSE, caption = caption, align = align, escape = TRUE,
       label = if (is.null(caption)) NA else paste0("plot-", gsub("[^a-z0-9]+", "-", tolower(caption)))))
-    # Retain column headings if a larger collection spans several pages.
+    # Repeat headings on each PDF page.
     heading <- strsplit(strsplit(table_text, "\\toprule\n", fixed = TRUE)[[1]][2],
                         "\\midrule\n", fixed = TRUE)[[1]][1]
     table_text <- sub("\\midrule\n", paste0("\\midrule\n\\endfirsthead\n\\toprule\n",
@@ -74,7 +85,7 @@ report_table <- function(d, caption = NULL, align = NULL, new_page = FALSE) {
   }
   cat("\n\n")
 }
-# Escape caption text once, character by character, including literal underscores.
+# Escape LaTeX caption characters.
 latex_escape <- function(x) {
   replacements <- c("\\" = "\\textbackslash{}", "{" = "\\{", "}" = "\\}",
                     "$" = "\\$", "&" = "\\&", "%" = "\\%", "#" = "\\#",
@@ -88,6 +99,15 @@ latex_escape <- function(x) {
 # Paths and shared style.
 data_dir <- params$data_dir
 figure_dir <- params$output_dir
+if (dir.exists(figure_dir) && length(list.files(figure_dir, all.files = TRUE, no.. = TRUE))) {
+  base_dir <- figure_dir
+  index <- 1L
+  repeat {
+    figure_dir <- file.path(base_dir, sprintf("run_%03d", index))
+    if (!file.exists(figure_dir)) break
+    index <- index + 1L
+  }
+}
 dir.create(figure_dir, recursive = TRUE, showWarnings = FALSE)
 max_columns <- as.integer(params$max_columns)
 if (length(max_columns) != 1L || is.na(max_columns) || max_columns < 1L ||
@@ -97,7 +117,7 @@ model_names <- c(gaussian = "Gaussian", poisson = "Poisson",
 blue <- "#176B98"; raw_gray <- "#8B9298"; ink <- "#253746"
 axis_gray <- "#6B7379"; point_size <- 0.36
 
-# Canonical names allow both native Bernoulli names and short model names.
+# Normalize Bernoulli model names.
 model_name <- function(x) sub("^bernoulli_", "", x)
 numbered_cols <- function(d, stem) {
   cols <- grep(paste0("^", stem, "[0-9]+$"), names(d), value = TRUE)
@@ -106,7 +126,7 @@ numbered_cols <- function(d, stem) {
 lambda_key <- function(x) paste(sprintf("%.17g", x), collapse = ",")
 lambda_label <- function(x) paste0("Lambda = (", paste(format(x, trim = TRUE, digits = 10), collapse = ", "), ")")
 
-# Configuration metadata, rather than filename fragments, identifies each case.
+# Identify cases from their saved configuration.
 read_config <- function(path) {
   if (!file.exists(path)) stop("Missing configuration file: ", path)
   cfg <- readRDS(path)
@@ -138,17 +158,17 @@ read_case <- function(path) {
   cfg <- read_config(sub("_results[.]csv$", "_config.rds", path))
   d <- read.csv(path, check.names = FALSE)
   K <- cfg$k; P <- K * (K + 1L) / 2L
-  stems <- c("stat_U_", "raw_lambda_", "debiased_lambda_")
-  counts <- c(K, P, P)
+  stems <- c("stat_U_", "debiased_lambda_")
+  counts <- c(K, P)
   for (j in seq_along(stems)) {
     if (!identical(numbered_cols(d, stems[j]), paste0(stems[j], seq_len(counts[j]))))
       stop("Component columns disagree with K in ", path)
   }
-  columns <- c(paste0("stat_U_", seq_len(K)), paste0("raw_lambda_", seq_len(P)),
+  columns <- c(paste0("stat_U_", seq_len(K)),
                paste0("debiased_lambda_", seq_len(P)), "chi_sq_U", "chi_sq_debiased_lambda")
   if (!all(c(columns, "convergence_code") %in% names(d)) || !nrow(d))
     stop("Missing statistics or empty results in ", path)
-  # read.csv represents an entirely NA column as logical when every fit failed.
+  # Convert all-NA columns from logical to numeric.
   for (column in columns) if (is.logical(d[[column]]) && all(is.na(d[[column]])))
     d[[column]] <- as.numeric(d[[column]])
   if (!all(vapply(d[columns], is.numeric, logical(1))))
@@ -157,7 +177,7 @@ read_case <- function(path) {
   finite <- rowSums(!is.finite(as.matrix(d[columns]))) == 0L
   keep <- converged & finite
   used <- d[keep, , drop = FALSE]
-  # Preserve the joint statistics in the CSV, but verify their definitions.
+  # Check saved joint statistics against squared component norms.
   if (nrow(used)) {
     for (pair in list(c("chi_sq_U", "stat_U_"), c("chi_sq_debiased_lambda", "debiased_lambda_"))) {
       sums <- rowSums(used[numbered_cols(used, pair[2])]^2)
@@ -165,7 +185,6 @@ read_case <- function(path) {
         stop("Joint statistic disagrees with component squared norms in ", path)
     }
   }
-  used$chi_sq_raw_lambda <- rowSums(used[paste0("raw_lambda_", seq_len(P))]^2)
   list(config = cfg, data = used, path = normalizePath(path),
        attempted = nrow(d), converged = sum(converged), used = sum(keep),
        selection = data.frame(row = seq_len(nrow(d)), converged = converged,
@@ -334,8 +353,8 @@ groups <- split(cases, vapply(cases, function(x) group_key(x$config), character(
 ## 3. Draw the QQ plots
 
 Each $K$ and $\Lambda$ setting is plotted separately, with models in rows.
-Main plots show Theorem 1 components, Theorem 2 components (raw in gray,
-debiased in blue), and joint chi-square statistics. Sample-size comparisons
+Main plots show Theorem 1 components, debiased Theorem 2 components,
+and their joint chi-square statistics. Sample-size comparisons
 show each component separately and use debiased results for Theorem 2.
 Missing combinations are labelled unavailable.
 
@@ -352,7 +371,7 @@ for (group_id in seq_along(groups)) {
   specs <- list(
     theorem1 = list(columns = paste0("stat_U_", seq_len(K)), df = NULL),
     theorem2 = list(columns = paste0("debiased_lambda_", seq_len(P)), df = NULL),
-    joint = list(columns = c("chi_sq_U", "chi_sq_raw_lambda", "chi_sq_debiased_lambda"), df = c(K, P, P)))
+    joint = list(columns = c("chi_sq_U", "chi_sq_debiased_lambda"), df = c(K, P)))
   if (!group_main_n %in% ns) cat("\n\nMain QQ plots skipped for ", label,
                                  ": requested main_n is unavailable in this group.\n\n", sep = "")
   if (group_main_n %in% ns) for (kind in names(specs)) {
@@ -360,18 +379,17 @@ for (group_id in seq_along(groups)) {
     component_pages <- pages(seq_along(spec$columns))
     for (page in seq_along(component_pages)) {
       indices <- component_pages[[page]]
-      headings <- if (kind == "joint") c("Theorem 1", "Theorem 2: raw", "Theorem 2: debiased")[indices] else paste("Component", indices)
+      headings <- if (kind == "joint") c("Theorem 1", "Theorem 2: debiased")[indices] else paste("Component", indices)
       caption <- paste(kind, label, paste0("n = ", group_main_n), paste0("page ", page), sep = "; ")
-      if (kind == "theorem2") caption <- paste(caption, "Raw (gray) and debiased (blue).")
+      if (kind == "theorem2") caption <- paste(caption, "Debiased statistics.")
       draw <- function() {
         g <- start_grid(length(models), length(indices), headings, unname(model_names[models]),
                         xlab = if (kind == "joint") paste0("Chi-square quantiles (df: ", paste(spec$df[indices], collapse = ", "), ")") else "Standard normal quantiles",
-                        legend_labels = if (kind == "theorem2") c("Raw", "Debiased") else NULL)
+                        legend_labels = NULL)
         for (r in seq_along(models)) for (j in seq_along(indices)) {
           index <- indices[j]; cols <- spec$columns[index]
-          if (kind == "theorem2") cols <- c(paste0("raw_lambda_", index), cols)
           df <- if (is.null(spec$df)) NULL else spec$df[index]
-          colors <- if (kind == "theorem2") c(raw_gray, blue) else if (kind == "joint" && index == 2L) raw_gray else blue
+          colors <- blue
           qq_panel(g, r, j, get_case(collection, models[r], group_main_n),
                    qq_limits(collection, models[r], cols, df), cols, df, colors)
         }
@@ -384,7 +402,7 @@ for (group_id in seq_along(groups)) {
   if (length(ns) > 1L) for (kind in names(specs)) {
     spec <- specs[[kind]]
     # Joint sample-size comparisons include Theorems 1 and 2 after correction.
-    indices <- if (kind == "joint") c(1L, 3L) else seq_along(spec$columns)
+    indices <- seq_along(spec$columns)
     n_pages <- pages(ns)
     for (index in indices) for (page in seq_along(n_pages)) {
       shown_n <- n_pages[[page]]; column <- spec$columns[index]
@@ -434,8 +452,7 @@ if (is.null(params$all_nodes_file)) {
     if (!dir.exists(path)) return(path)
     found <- list.files(path, "^component_summary[.]csv$", recursive = TRUE, full.names = TRUE)
     paired <- file.exists(file.path(dirname(found), "config.rds"))
-    # Native runs also contain an aggregate summary above the per-case folders.
-    # Use the per-case copies with their own configurations, without duplicates.
+    # Use configured per-case summaries; skip duplicate aggregate copies.
     for (aggregate in found[!paired]) {
       has_children <- any(startsWith(found[paired], paste0(dirname(aggregate), "/")))
       if (!has_children) stop("Missing config.rds beside all-node summary: ", aggregate)

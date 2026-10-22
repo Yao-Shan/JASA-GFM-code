@@ -21,7 +21,7 @@ Logit and Probit require binary edges; Poisson requires nonnegative integer
 counts; Gaussian accepts real-valued edges. Missing edges, directed networks,
 covariates, and a separate intercept are not supported.
 
-Run commands from the repository root. For CSV files without headers or row labels:
+Run commands from the `without_intercept/` folder. For CSV files without headers or row labels:
 
 ```r
 source("R/gfm_estimation.R")
@@ -120,7 +120,7 @@ For example, to allow more iterations and tighten the stopping tolerance:
 
 ```r
 fit <- gfm_fit(A, K = ncol(U_star), model = "logit", U_star = U_star,
-               control = list(max_iter = 60000L, tolerance = 0.01))
+               control = list(max_iter = 60000L, tolerance = 0.0001))
 ```
 
 `max_iter` counts optimization updates for this one network, not simulated

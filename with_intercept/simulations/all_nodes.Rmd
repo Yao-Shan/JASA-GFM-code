@@ -1,0 +1,180 @@
+---
+title: "Baseline GFM: inference for all nodes"
+output:
+  html_document:
+    toc: true
+    code_folding: hide
+params:
+  alpha_normalization: "l2"
+  debias_method: "pdf_bp_bm"
+  worker_backend: "in_process"
+  run_simulation: false
+  model: "all"
+  n: 60
+  n_sim: 3
+  k: null
+  lambda_values: "0.5,0.5"
+  design_seed: 238687
+  alpha_seed: 817285
+  replication_seed_base: 2000
+  alpha_min: -2
+  alpha_max: 0
+  sigma: 1
+  learning_rate: null
+  max_iter: null
+  tolerance: 0.05
+  M_bound_U: null
+  M_bound_alpha: null
+  M_bound_Lambda: null
+  probability_eps: null
+  max_debias_memory_mb: null
+  backtracking: false
+  debias: false
+  save_fits: false
+  n_cores: 1
+  inference_workers: 1
+  output_dir: null
+  run_id: null
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = TRUE, warning = TRUE)
+input_file <- knitr::current_input(dir = TRUE)
+active_file <- if (requireNamespace("rstudioapi", quietly = TRUE) && rstudioapi::isAvailable())
+  tryCatch(rstudioapi::getSourceEditorContext()$path, error = function(e) "") else ""
+input_dirs <- c(if (length(input_file) == 1L && !is.na(input_file) && nzchar(input_file)) dirname(input_file),
+                if (nzchar(active_file)) dirname(active_file), getwd())
+candidates <- unique(unlist(lapply(input_dirs, function(p)
+  c(p, file.path(p, ".."), file.path(p, "with_intercept")))))
+valid <- vapply(candidates, function(p) file.exists(file.path(p, "R", "gfm_baseline.R")), logical(1))
+if (!any(valid)) stop("Cannot locate with_intercept/R/gfm_baseline.R; keep the package directories together.")
+project_root <- normalizePath(candidates[which(valid)[1L]], mustWork = TRUE)
+baseline_root <- file.path(project_root, "R")
+source(file.path(baseline_root, "gfm_baseline.R"), local = knitr::knit_global())
+if (!isTRUE(getOption("knitr.in.progress")) || !exists("params", inherits = FALSE)) {
+  parsed <- knitr::knit_params(readLines(file.path(project_root, "simulations", "all_nodes.Rmd"), warn = FALSE))
+  params <- lapply(parsed, function(x) x$value)
+}
+lambda_values <- if (is.character(params$lambda_values)) {
+  as.numeric(trimws(strsplit(params$lambda_values, ",", fixed = TRUE)[[1L]]))
+} else as.numeric(params$lambda_values)
+K <- if (is.null(params$k)) length(lambda_values) else params$k
+models <- if (identical(params$model, "all")) c("gaussian", "logit", "poisson", "probit") else params$model
+control <- Filter(Negate(is.null), list(
+  learning_rate = params$learning_rate, max_iter = params$max_iter,
+  tolerance = params$tolerance, M_bound_U = params$M_bound_U,
+  M_bound_alpha = params$M_bound_alpha, M_bound_Lambda = params$M_bound_Lambda,
+  probability_eps = params$probability_eps,
+  max_debias_memory_mb = params$max_debias_memory_mb, backtracking = params$backtracking
+))
+# NULL selects at most seven workers; 1 selects one.
+n_cores <- if (is.null(params$n_cores)) {
+  min(7L, max(1L, parallel::detectCores(logical = FALSE) - 1L, na.rm = TRUE))
+} else as.integer(params$n_cores)
+output_dir <- if (is.null(params$output_dir)) file.path(project_root, "data", "baseline",
+  paste0("alpha_", params$alpha_normalization)) else params$output_dir
+```
+
+This is the all-node entry point for the same centered baseline estimator.
+It uses $a_i\overset{\mathrm{iid}}{\sim}\mathrm{Uniform}(-2,0)$ and $\alpha_i^\star=a_i/\|a\|_2$ and
+$\Theta_{ij}^\star=\alpha_i^\star+\alpha_j^\star+
+(u_i^\star)^\top\Lambda^\star u_j^\star$.
+
+`run_simulation` defaults to `false`. The small configuration has 60 nodes
+and three independently generated networks per observation model.
+The latent truth and node effects stay fixed across repetitions and models.
+Global Lambda correction is disabled here by default; set `debias: true`
+explicitly to compute it. The default `pdf_bp_bm` correction retains the theory BP formula,
+includes BM once, and uses the reviewed exact finite-sample projector
+(see `node_inference.Rmd`). Both entry points call
+the same core functions.
+`n_cores` sets how many worker processes fit the networks in parallel
+(`null` uses at most seven physical cores, `1` uses one worker); results
+are identical either way.
+YAML controls set to `null` keep core defaults; non-null overrides are passed
+to `gfb_config()` and saved with the run settings.
+
+Save YAML edits before running setup or Run All. Interactive execution
+reloads saved values each time; Knit with Parameters retains supplied overrides.
+`worker_backend: "in_process"` and `n_cores: 1` are the portable trial defaults.
+For parallel runs explicitly select `worker_backend: "psock"` and a worker count.
+This notebook uses the ordinary R implementation for fitting and inference.
+
+The default `alpha_normalization: "l2"` first samples raw
+$a_i\overset{\mathrm{iid}}{\sim}\mathrm{Uniform}(-2,0)$, then uses
+$\alpha_i^\star=a_i/\sqrt{\sum_j a_j^2}$, so $\|\alpha^\star\|_2=1$.
+The transformed components share a random denominator: they are dependent,
+are no longer Uniform(-2,0), and their typical scale decreases as $n^{-1/2}$.
+This changes the data-generating design, not the estimation constraints,
+full-matrix initialization, optimizer controls or BP+BM correction.
+Set `alpha_normalization: "none"` to reproduce the original unscaled draws.
+Saved truth retains `alpha_raw` and normalization metadata. The default output
+and figure paths separate `alpha_l2` from `alpha_none`; an explicitly supplied
+`output_dir` or `figure_dir` remains in effect. Do not combine different
+generation modes or existing screening results in one evaluation.
+
+## Fixed design
+
+```{r truth}
+truth <- gfb_generate_truth(
+  n = params$n, K = K, lambda_values = lambda_values,
+  design_seed = params$design_seed, alpha_seed = params$alpha_seed,
+  alpha_min = params$alpha_min, alpha_max = params$alpha_max, alpha_normalization = params$alpha_normalization
+)
+truth$diagnostics
+data.frame(alpha_normalization = params$alpha_normalization,
+           alpha_raw_l2_norm = sqrt(sum(truth$alpha_raw^2)),
+           alpha_model_l2_norm = sqrt(sum(truth$alpha_star^2)))
+data.frame(alpha_min_observed = min(truth$alpha_star),
+           alpha_max_observed = max(truth$alpha_star),
+           max_center_error = max(abs(colSums(truth$U_star))),
+           max_orthogonality_error = max(abs(crossprod(truth$U_star) / params$n - diag(K))))
+```
+
+## Fit and infer all nodes
+
+```{r simulate}
+simulation <- NULL
+if (isTRUE(params$run_simulation)) {
+  simulation <- gfb_run_simulation(
+    n = params$n, K = K, models = models, n_sim = params$n_sim,
+    nodes = seq_len(params$n), lambda_values = lambda_values,
+    sigma = params$sigma, design_seed = params$design_seed,
+    alpha_seed = params$alpha_seed, replication_seed_base = params$replication_seed_base,
+    alpha_min = params$alpha_min, alpha_max = params$alpha_max, alpha_normalization = params$alpha_normalization,
+    control = control, debias = params$debias, debias_method = params$debias_method,
+    output_dir = output_dir, run_id = params$run_id, save_fits = params$save_fits,
+    n_cores = n_cores,
+    worker_backend = params$worker_backend,
+    inference_workers = params$inference_workers
+  )
+  print(simulation$fit_summary)
+  cat("Saved run:", simulation$run_dir, "\n")
+} else {
+  cat("Truth checked. No networks were fitted and no simulation files were written.\n")
+}
+```
+
+```{r node-status}
+if (!is.null(simulation)) {
+  print(table(simulation$fit_summary$model, simulation$fit_summary$status))
+  if (nrow(simulation$node_summary)) {
+    print(table(simulation$node_summary$model, simulation$node_summary$status))
+    print(utils::head(simulation$node_summary, 12L))
+  }
+}
+```
+
+Rows in `node_summary` are keyed by model, replicate and node. Joint
+standardization has $K+1$ coordinates; `alpha_marginal_z` is a separate
+univariate node-effect statistic. Failed fits and invalid node information
+are retained and explicitly flagged. Nodes from the same network are
+dependent; pooled node rows must not be interpreted as independent Monte
+Carlo repetitions. Three repetitions verify execution, not calibration.
+`fit$diagnostics$one_sided_nodes` identifies binary nodes with all-zero or
+all-one incident observations and Poisson nodes with all-zero observations.
+Inference is unavailable for those fits even if the numerical residual is tiny.
+
+The results use fresh run directories below `data/baseline/alpha_l2/` by default; original
+simulation results are untouched. The plotting notebook reads these saved
+results and generates per-node QQ figures without fitting new models.

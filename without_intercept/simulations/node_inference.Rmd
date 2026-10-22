@@ -45,7 +45,7 @@ params:
 ---
 
 ```{r report-format, include=FALSE}
-# Wrap long console lines in PDF without changing calculations or saved files.
+# Wrap long console lines in PDF reports.
 if (knitr::is_latex_output()) {
   original_output_hook <- knitr::knit_hooks$get("output")
   knitr::knit_hooks$set(output = function(x, options) {
@@ -89,9 +89,10 @@ Both formats execute the selected experiment. To plot saved results only, use
 | `output_dir` | `null` creates setting-specific folders; repeated identical runs overwrite matching files. |
 
 Non-`null` YAML values override `default_model_configs()`. The current YAML
-runs a trial with four models, $n=100$, 100 replications, node 1, and
-$\Lambda^\star=\operatorname{diag}(0.5,0.5)$. Set `n` and `n_sim` to 1000 for
-the main paper sample size and repetition count. All four simulation optimizer
+runs four models, $n=1000$, 1000 replications, node 1, and
+$\Lambda^\star=\operatorname{diag}(0.5,0.5)$. The saved `run_simulation: true`
+starts this full experiment; use `run_simulation: false` to check the truth
+without fitting. All four simulation optimizer
 tolerances are currently 0.001. The design seed was selected after
 examining simulation performance, so this is not independent seed validation.
 See the [simulation guide](../docs/simulation_guide.md) for other settings and
@@ -157,8 +158,7 @@ The code below follows this order:
 library(doParallel)
 library(foreach)
 
-# Defaults for sourced code: check truth only unless simulation is enabled.
-# Supplied params override these values, including explicit NULL entries.
+# Sourced defaults check truth only; supplied params override them.
 default_runtime_params <- list(
   model = "all",
   run_simulation = FALSE,
@@ -206,9 +206,8 @@ RNGkind(
   sample.kind = "Rejection"
 )
 
-# -------------------------- Configuration ------------------------
-
-# Resolve supported aliases to a single model name used by all routines.
+# Configuration
+# Normalize model names and aliases.
 normalize_model_name <- function(model) {
   key <- tolower(gsub("[- ]", "_", model))
   aliases <- c(
@@ -233,8 +232,7 @@ normalize_model_name <- function(model) {
 parse_lambda_values <- function(value) {
   if (is.null(value)) return(NULL)
 
-  # Accept an R numeric vector/list, YAML [a, b, ...], or a comma-separated
-  # character value supplied programmatically.
+  # Accept numeric vectors/lists or comma-separated values.
   if (is.character(value)) {
     pieces <- unlist(strsplit(
       gsub("\\[|\\]", "", paste(value, collapse = ",")),
@@ -297,13 +295,10 @@ resolve_latent_parameters <- function(base_config, k_value, lambda_values) {
   list(k = as.integer(k), lambda_vec = lambda_vec)
 }
 
-# Supply model-specific defaults, then apply non-NULL runtime overrides.
-# probability_eps clips Bernoulli probabilities only at initialization.
-# probability_floor, curvature_floor, and node_information_floor are
-# truth-diagnostic thresholds; they do not regularize the fitted model.
+# Supply model defaults; non-NULL parameters override them.
+# probability_eps applies at initialization; the other floors diagnose truth.
 default_model_configs <- function() {
-  # Each bare configuration is valid and uses the main paper setting.
-  # Non-NULL YAML parameters override these values before validation.
+  # Start from paper settings before applying YAML overrides.
   list(
     bernoulli_logit = list(
       model = "bernoulli_logit",
@@ -488,8 +483,7 @@ validate_model_config <- function(config) {
   invisible(TRUE)
 }
 
-# --------------------------- Utilities ---------------------------
-
+# Utilities
 # Remove numerical asymmetry by averaging a matrix with its transpose.
 symmetrize <- function(A) (A + t(A)) / 2
 
@@ -509,9 +503,8 @@ stable_log1pexp <- function(x) {
   pmax(x, 0) + log1p(exp(-abs(x)))
 }
 
-# Drop exactly n_drop eigenvalues closest to zero in absolute value.
-# Require every retained eigenvalue to be strictly positive and invert it
-# without a numerical cutoff; n_drop is the only tuning parameter.
+# Drop n_drop eigenvalues nearest zero, then invert the positive remainder.
+# No tolerance-based cutoff is used.
 safe_pinv_psd <- function(A, n_drop = 0L) {
   A <- symmetrize(A)
   eg <- eigen(A, symmetric = TRUE)
@@ -662,8 +655,7 @@ lambda_direction_derivative <- function(ui, uj) {
   as.vector(out)
 }
 
-# Return a certified joint projection when the scaled polar factor is feasible;
-# stop if its row norms violate the bound, since row clipping is not equivalent.
+# Project onto U' U = n I; reject a violated row bound rather than clip rows.
 project_C_U_certified <- function(
   Z, bound, row_tolerance = 1e-10, gram_tolerance = 1e-10,
   objective_tolerance = 1e-10, context = ""
@@ -678,11 +670,8 @@ project_C_U_certified <- function(
     stop("C_U is infeasible: require n >= k and M_bound_U >= sqrt(k).")
   }
 
-  # The scaled polar factor is a global Euclidean projection onto
-  # {U: U^T U = n I_k}. If it also satisfies the row-norm bound, it is
-  # therefore a global projection onto the intersection C_U. When the row
-  # bound is active, clipping would destroy U^T U = n I_k; fail explicitly
-  # instead of silently replacing the theoretical joint projection.
+  # The polar projection is valid only if it also meets the row bound.
+  # Row clipping would break U^T U = n I_K, so a violation raises an error.
   decomposition <- svd(Z, nu = k, nv = k)
   U <- sqrt(n) * decomposition$u[, seq_len(k), drop = FALSE] %*%
     t(decomposition$v[, seq_len(k), drop = FALSE])
@@ -766,8 +755,7 @@ projected_gradient_mapping_components <- function(
   )
 }
 
-# --------------------- Distribution quantities ------------------
-
+# Distribution quantities
 # Compute probit probabilities and stable density-to-tail ratios:
 # a = phi(theta)/Phi(theta), b = phi(theta)/(1 - Phi(theta)).
 probit_ratios <- function(theta) {
@@ -841,10 +829,8 @@ negative_score_matrix <- function(theta, A, config) {
   )
 }
 
-# For the edge log-likelihood ell(theta; y), return information = -E[ell''],
-# E[ell'''], and E[ell' * ell'']; outcome-specific information is -ell''.
-# These use log-likelihood signs, whereas negative_score_matrix()
-# differentiates the negative log-likelihood used by the optimizer.
+# Return -E[ell''], E[ell'''], and E[ell' * ell''] for one edge log-likelihood.
+# These signs differ from the optimizer's negative-log-likelihood derivatives.
 expected_derivative_terms <- function(theta, config) {
   zero <- 0 * theta
 
@@ -959,9 +945,7 @@ validate_probit_derivatives()
 
 # Evaluate the realized negative second derivative for each observed edge.
 observed_information_matrix <- function(theta, config, A = NULL) {
-  # For Gaussian, logit, and Poisson, the observed negative Hessian is
-  # identical to the expected Fisher information.  Probit is different:
-  # its observed curvature depends on the realized binary outcome.
+  # Only probit has outcome-dependent observed information.
   if (config$model != "bernoulli_probit") {
     return(expected_derivative_terms(theta, config)$information)
   }
@@ -979,17 +963,14 @@ observed_information_matrix <- function(theta, config, A = NULL) {
   information <- ifelse(A > 0.5, information_y1, information_y0)
   dim(information) <- dim(theta)
 
-  # Both expressions are nonnegative analytically.  Remove only negative
-  # roundoff caused by tail-ratio cancellation.
+  # Clip negative roundoff; both expressions are analytically nonnegative.
   pmax(information, 0)
 }
 
-# -------------------- Truth and data generation -----------------
-
+# Truth and data generation
 # DLSM rejection sampler: https://github.com/yatian20/DLSM/blob/main/simulation.R
-# Return n iid unit-ball rows: E(z_i)=0 and E(z_i z_i^T)=I_K/(K+2).
-# Repeat batches of min(50000, n*2^K), unless batch_size is supplied.
-# Acceptance counts include unused accepted rows from the final batch.
+# Draw n iid unit-ball rows; E(z_i z_i^T) = I_K/(K+2).
+# Acceptance counts include unused rows from the final batch.
 sample_unit_ball_rejection <- function(n, k, batch_size = NULL) {
   positive_integer <- function(x) {
     is.numeric(x) && length(x) == 1L && is.finite(x) &&
@@ -1183,9 +1164,8 @@ calculate_truth_diagnostics <- function(
   )
 }
 
-# Always enforce construction identities and parameter-space bounds.
-# truth_check_action controls only additional regularity thresholds:
-# "error" stops, "warning" reports, and "none" records issues silently.
+# Enforce construction identities and bounds.
+# truth_check_action controls only additional regularity warnings/errors.
 apply_truth_checks <- function(diagnostics, config, tolerance = 1e-8) {
   if (!is.null(diagnostics$raw_ball_radius_bound) &&
       diagnostics$raw_max_row_norm >
@@ -1456,8 +1436,7 @@ generate_network_rep <- function(truth, config, replication_seed) {
   A
 }
 
-# -------------------- Spectral initialization -------------------
-
+# Spectral initialization
 # Select singular directions above the initialization threshold, keeping >= K.
 spectral_keep_indices <- function(singular_values, k, offset) {
   p <- length(singular_values)
@@ -1509,8 +1488,7 @@ initialize_spectral <- function(A, config) {
   )
 }
 
-# -------------------- Objective, gradient, PGD ------------------
-
+# Objective, gradient, PGD
 # Evaluate the network objective using each off-diagonal edge exactly once.
 calculate_objective_network <- function(U, Lambda, A, config) {
   Theta <- U %*% Lambda %*% t(U)
@@ -1581,10 +1559,8 @@ run_pgd_network <- function(A, config) {
       config$M_bound_Lambda
     )
 
-    # On the orthogonality-constrained parameter space, the raw Euclidean
-    # gradient need not vanish at the optimum. The mapping must be divided by
-    # the effective steps actually used by the code: eta_U = lr/n and, under
-    # the paper's lambda_v parameterization, eta_lambda_v = lr/(2 n^2).
+    # Scale projected residuals by eta_U = lr/n and eta_lambda_v = lr/(2*n^2).
+    # The unconstrained gradient need not vanish at a constrained optimum.
     residuals <- projected_gradient_mapping_components(
       U_hat, U_next, Lambda_hat, Lambda_next,
       config$learning_rate, n
@@ -1605,8 +1581,7 @@ run_pgd_network <- function(A, config) {
     }
   }
 
-  # The final update can itself cross the tolerance. Re-evaluate at the
-  # returned iterate so a max-iteration exit is classified correctly.
+  # Recheck the returned iterate: the final update may satisfy tolerance.
   if (convergence_code == 1L) {
     final_grads <- calculate_gradient_network(U_hat, Lambda_hat, A, config)
     final_U_projection <- project_C_U_certified(
@@ -1665,10 +1640,8 @@ run_pgd_network <- function(A, config) {
   )
 }
 
-# ---------------- Rotation and node-wise inference ---------------
-
-# Align U_hat to true U_star and rotate Lambda to preserve fitted predictors.
-# Requires known true coordinates.
+# Rotation and node-wise inference
+# Align to known U_star and rotate Lambda to preserve fitted predictors.
 rotate_estimator <- function(U_hat, Lambda_hat, U_star) {
   n <- nrow(U_hat)
   if (nrow(U_star) != n || ncol(U_hat) != ncol(U_star)) {
@@ -1695,17 +1668,14 @@ rotate_estimator <- function(U_hat, Lambda_hat, U_star) {
 calculate_node_information <- function(U, Lambda, node_idx, config, A = NULL) {
   Theta <- U %*% Lambda %*% t(U)
   diag(Theta) <- 0
-  # Use the realized negative Hessian for Theorem 1 standardization.
-  # For Gaussian, logit, and Poisson it equals expected Fisher information;
-  # for probit it also depends on the observed edge outcomes in A.
+  # Use observed information; only probit also depends on the outcomes in A.
   V <- observed_information_matrix(Theta, config, A)
   diag(V) <- 0
   W <- U %*% Lambda
   symmetrize(t(W) %*% (V[node_idx, ] * W))
 }
 
-# --------------- Constrained joint information ------------------
-
+# Constrained joint information
 # Build constraint derivatives, using U_anchor for the rotational constraints.
 build_D_UG <- function(U, U_anchor) {
   n <- nrow(U)
@@ -1740,17 +1710,15 @@ build_D_UG <- function(U, U_anchor) {
   DUG
 }
 
-# Form joint information from observed edge curvature and predictor derivatives.
-# Project out constrained U directions to obtain efficient Lambda information.
-# Retain expected node blocks separately for the B1/BM/BP bias formulas.
+# Build observed joint information and project out constrained U directions.
+# Keep expected node information separately for bias terms.
 build_information_blocks <- function(U, Lambda, U_anchor, config, A = NULL) {
   n <- nrow(U)
   k <- ncol(U)
   d <- k * (k + 1L) / 2L
   Theta <- U %*% Lambda %*% t(U)
   diag(Theta) <- 0
-  # Weight the joint information blocks by observed edge curvature. Probit
-  # uses the observed outcomes; the other models agree with Fisher weights.
+  # Weight by observed curvature, including probit's outcome dependence.
   V <- observed_information_matrix(Theta, config, A)
   V_expected <- expected_derivative_terms(Theta, config)$information
   diag(V) <- 0
@@ -1796,9 +1764,8 @@ build_information_blocks <- function(U, Lambda, U_anchor, config, A = NULL) {
   DGU_DUG_inverse <- ordinary_inverse_pd(
     DGU_DUG, "D_GU D_UG nuisance Gram matrix"
   )
-  # Finite-sample nuisance projector. Do not replace D_GU D_UG by n I:
-  # Pi_nui = D_UG (D_GU D_UG)^+ D_GU. The numerical-rank check above makes
-  # the Moore-Penrose inverse equal to the ordinary inverse used here.
+  # Exact projector: D_UG (D_GU D_UG)^+ D_GU; do not substitute n I.
+  # The rank check permits an ordinary inverse here.
   Pi_nui <- symmetrize(
     DUG %*% DGU_DUG_inverse$inverse %*% DGU
   )
@@ -1841,8 +1808,7 @@ build_information_blocks <- function(U, Lambda, U_anchor, config, A = NULL) {
   )
 }
 
-# ------------------ Bias and debiasing terms --------------------
-
+# Bias and debiasing terms
 # Compute B1, BM, and BP terms using expected node information and edge moments.
 calculate_bias_terms <- function(U, Lambda, expected_blocks, config) {
   n <- nrow(U)
@@ -1891,10 +1857,8 @@ calculate_bias_terms <- function(U, Lambda, expected_blocks, config) {
   )
 }
 
-# Compute likelihood and constraint-penalty corrections in lambda_v units.
-# The corrected estimate is lambda_v_hat + correction_total (ADDITIVE).
-# correction_penalty already includes its minus sign.
-# U_star is the known-truth anchor used for this simulation convention.
+# Add likelihood and constraint corrections to lambda_v_hat using true U_star.
+# correction_penalty already includes its sign; all terms use lambda_v units.
 calculate_debiasing_components <- function(
   U, Lambda, U_star, config, A = NULL
 ) {
@@ -1906,8 +1870,7 @@ calculate_debiasing_components <- function(
   Seff_inverse <- ordinary_inverse_pd(
     info$Seff, "Theorem 2 efficient information"
   )
-  # The B1/BM/BP formulas use the expected node-information blocks; keep
-  # those separate from the observed Hessian blocks used in Seff above.
+  # Bias terms use expected node information; Seff uses observed information.
   bias <- calculate_bias_terms(U, Lambda, info$expected_blocks, config)
 
   core <- (bias$B1L - bias$BML) -
@@ -1943,14 +1906,10 @@ calculate_debiasing_components <- function(
   )
 }
 
-# --------------------- Monte Carlo replication ------------------
-
-# Define one CSV row per attempted replication, with K-dependent columns.
-# stat_U_*: standardized errors for target_node; chi_sq_U: their squared norm.
-# raw_lambda_* / debiased_lambda_*: standardized errors, not estimates.
-# lambda_raw_error_* / lambda_debiased_error_*: errors in lambda_v units.
-# correction_likelihood_* / correction_penalty_*: additive corrections
-# in those same units. Diagnostics and failed rows are retained.
+# Monte Carlo replication
+# One CSV row per attempt; retain diagnostics and failed rows.
+# stat_U_* and raw_lambda_*/debiased_lambda_* are standardized errors.
+# lambda_*_error_* and correction_* use unstandardized lambda_v units.
 result_column_names <- function(k) {
   d <- k * (k + 1L) / 2L
   names <- c(
@@ -1982,10 +1941,8 @@ result_column_names <- function(k) {
   names
 }
 
-# Create an NA row retaining the status: 1 = iteration limit, 2 = non-finite
-# optimizer result, 3 = a caught fitting or inference error. Code 0 denotes
-# successful completion in one_replication(). An uncertified U projection
-# instead aborts the full run; see the active_U_row_bound handler below.
+# Keep a failed row: 1 = iteration limit, 2 = nonfinite, 3 = caught error.
+# Code 0 means success; an uncertified U projection aborts the entire run.
 failed_result <- function(k, code = 3L) {
   out <- rep(NA_real_, length(result_column_names(k)))
   names(out) <- result_column_names(k)
@@ -2023,17 +1980,14 @@ one_replication <- function(sim, truth, config) {
       rot$U_q, rot$Lambda_q, config$target_node, config, A = A
     )
     assert_positive_definite(node_info, "Theorem 1 node information")
-    # Theorem 1: z_U = node_info^(1/2) (u_hat_aligned - u_star),
-    # with K components for the selected node. node_info already sums edge
-    # contributions, so no extra sqrt(n) factor is applied. The matrix square root
-    # standardizes the full vector and can mix its original coordinates.
+    # T1: z_U = node_info^(1/2) (u_hat_aligned - u_star).
+    # Information already sums edges; no extra sqrt(n). Whitening mixes coordinates.
     z_U <- as.vector(
       safe_sqrt_psd(node_info) %*%
         (rot$U_q[config$target_node, ] - truth$U_star[config$target_node, ])
     )
 
-    # Theorem 2 uses the full-network information and does not depend on
-    # target_node. Retain U_star as the oracle rotational-constraint anchor.
+    # T2 is global and independent of target_node; true U_star anchors rotation.
     deb <- calculate_debiasing_components(
       rot$U_q, rot$Lambda_q, truth$U_star, config, A = A
     )
@@ -2041,9 +1995,7 @@ one_replication <- function(sim, truth, config) {
     raw_v <- deb$lambda_v_hat
     corrected_v <- raw_v + deb$correction_total
     Seff_half <- safe_sqrt_psd(deb$Seff)
-    # Apply the same efficient-information square root before and after
-    # correction. These d-dimensional standardized components may mix
-    # the original lambda_v coordinates; they are not Lambda entries.
+    # Use the same whitening for raw/corrected errors; components are not Lambda entries.
     z_raw <- as.vector(Seff_half %*% (raw_v - true_v))
     z_debiased <- as.vector(Seff_half %*% (corrected_v - true_v))
 
@@ -2095,8 +2047,7 @@ one_replication <- function(sim, truth, config) {
     out
   }, error = function(e) {
     if (inherits(e, "active_U_row_bound")) {
-      # This event invalidates the exact-projection claim. Abort the full
-      # formal run rather than silently excluding the affected replication.
+      # An uncertified projection aborts the run, rather than dropping one row.
       stop(e)
     }
     message("Replication ", sim, " failed: ", conditionMessage(e))
@@ -2276,21 +2227,18 @@ run_monte_carlo <- function(config, n_cores = NULL, truth = NULL) {
   results
 }
 
-# ---------------------- Summaries and plots ---------------------
-
+# Summaries and plots
 # Exclude non-finite values before computing summaries or plotting quantiles.
 finite_values <- function(x) x[is.finite(x)]
 
-# By default select code-0 rows; plotting additionally removes non-finite values.
-# Returning all rows does not reconstruct statistics missing after a failure.
+# Select successful rows by default; plotting also removes nonfinite values.
 inference_rows <- function(results, converged_only = TRUE) {
   if (!converged_only) return(seq_len(nrow(results)))
   which(results[, "convergence_code"] == 0)
 }
 
-# Compare one standardized component to N(0,1) across retained replications.
-# The title reports mean(x) and sample SD sd(x), not variance or the
-# Monte Carlo standard error of the mean. The reference line is y = x.
+# Compare one component with N(0,1); the reference is y = x.
+# Titles show mean and sample SD, not variance or Monte Carlo SE.
 qqplot_standard_normal <- function(x, main, col = "darkblue") {
   x <- finite_values(x)
   if (length(x) < 2L) {
@@ -2325,9 +2273,8 @@ qqplot_chisq <- function(x, df, main) {
   invisible(NULL)
 }
 
-# Plot each of the K node and d = K*(K+1)/2 Lambda components separately.
-# Default filtering uses successful replications. Joint squared norms
-# are compared with chi-square laws having K and d degrees of freedom.
+# Plot K node and d=K(K+1)/2 Lambda components separately.
+# Their joint squared norms use chi-square references with K and d degrees of freedom.
 plot_results <- function(results, config, converged_only = TRUE) {
   rows <- inference_rows(results, converged_only)
   if (!length(rows)) stop("No converged replications available for plotting.")
@@ -2364,9 +2311,8 @@ plot_results <- function(results, config, converged_only = TRUE) {
   invisible(NULL)
 }
 
-# Report statuses for all attempts, then mean and sample SD for each
-# component among successful replications. Joint coverage is the fraction
-# of squared-norm statistics below the corresponding 95% chi-square cutoff.
+# Report all attempt statuses and successful-component means/sample SDs.
+# Joint coverage uses the 95% chi-square cutoff.
 print_simulation_summary <- function(results, config) {
   k <- config$k
   d <- k * (k + 1L) / 2L
@@ -2492,8 +2438,7 @@ numeric_vector_tag <- function(x, readable_limit = 6L) {
   paste0(readable, "_h", hash)
 }
 
-# Resolve a setting-specific output directory without creating it.
-# Explicit paths keep the existing single-model and multi-model behavior.
+# Resolve the output path for this model and setting.
 simulation_output_dir <- function(config, output_dir = NULL,
                                   multiple_models = FALSE) {
   model_dir <- sub("^bernoulli_", "", config$model)
@@ -2512,8 +2457,7 @@ simulation_output_dir <- function(config, output_dir = NULL,
             setting, model_dir)
 }
 
-# Save all attempted rows as CSV, metadata/results as RDS, and available QQ plots.
-# Keep the matching config with each CSV.
+# Save all attempts, matching configuration, RDS results and available QQ plots.
 save_outputs <- function(results, config, output_dir) {
   dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
   lambda_tag <- numeric_vector_tag(config$lambda_vec)
@@ -2568,17 +2512,8 @@ save_outputs <- function(results, config, output_dir) {
   ))
 }
 
-# ----------------------- Model selection ------------------------
-
-# Change params$model in the YAML header, or render with, e.g.:
-# rmarkdown::render(
-#   "node_inference.Rmd", # Run this example from the simulations/ directory.
-#   params = list(
-#     model = "poisson", n = 300, n_sim = 100, k = 3, target_node = 1,
-#     lambda_values = "0.30, 0.25, 0.20",
-#     run_simulation = TRUE
-#   )
-# )
+# Model selection
+# Set the model and experiment parameters in YAML or rmarkdown::render().
 
 requested_key <- tolower(gsub("[- ]", "_", runtime_params$model))
 selected_models <- if (requested_key %in% c("all", "all_models")) {
@@ -2713,8 +2648,7 @@ for (selected_model in selected_models) {
       " Maximum iterations:", config$max_iter,
       " Tolerance:", config$tolerance, "\n")
 
-  # false runs the truth checks above only; it does not read saved CSVs,
-  # start Monte Carlo workers, or call save_outputs().
+  # With simulation disabled, only truth checks run.
   if (isTRUE(runtime_params$run_simulation)) {
     results <- run_monte_carlo(
       config, n_cores = requested_cores, truth = truth

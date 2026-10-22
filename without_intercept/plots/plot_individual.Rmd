@@ -1,0 +1,88 @@
+---
+title: "Individual GFM figures without intercept"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    code_folding: hide
+params:
+  run_plots: false
+  data_dir: null
+  output_dir: "../data/figures_individual"
+  n: 1000
+  models: [gaussian, poisson, logit, probit]
+  lambda_settings: null
+  histogram_bins: 30
+  figure_types: [qq, hist_estimates, hist_errors]
+  require_complete: true
+  overwrite: false
+  previews: true
+---
+
+Draw individual vector PDFs from saved results. Set `data_dir` to a native
+result folder, set `run_plots: true`, then Knit. Paths are relative to this Rmd.
+The default only loads the plotting functions and does not create figures.
+
+Each component is separate, with dimensions read from the configuration:
+
+- `qq`: normal and joint chi-square QQ plots; Theorem 2 shows **debiased results only**.
+- `hist_estimates`: overlaid histograms of raw and debiased Lambda matrix entries.
+- `hist_errors`: the same estimates after subtracting their true entries.
+
+All labels use LaTeX (Latin Modern), including `$\Lambda^\star$`. QQ plots use
+open circles and no confidence band. Histograms share bins, show density, and
+use coral and blue. `pdflatex` with `lmodern` and Cairo-enabled R are required;
+`pdftoppm` is optional for PNG previews.
+
+## Select the saved results
+
+Use one consistent experiment collection. Native `*_results.csv` files need
+matching `*_config.rds` files. The historical `manifest.csv` layout also works.
+`n` selects the sample size; `models` selects models. `lambda_settings: null`
+uses all available settings; for example, `[[0.5, 0.5]]` selects one setting.
+
+By default, `require_complete: true` requires a complete successful run.
+Set it to `false` to retain converged rows with finite values for the selected
+figures; `records/row_selection.csv` records every exclusion. Both histogram
+methods always use the same replications. Only columns needed by `figure_types`
+are required.
+
+```{r setup}
+knitr::opts_chunk$set(echo = TRUE, message = TRUE, warning = TRUE)
+source("plot_individual.R")
+if (!is.logical(params$run_plots) || length(params$run_plots) != 1L || is.na(params$run_plots))
+  stop("run_plots must be TRUE or FALSE.")
+```
+
+## Export the figures
+
+Existing output is preserved by creating `run_001`, `run_002`, etc. Set
+`overwrite: true` only to replace matching files. Inputs are always read-only.
+The returned folder contains PDFs, a gallery, input checksums, histogram bins,
+and component summaries. The `latex/` folder retains the TeX sources.
+
+```{r export}
+if (isTRUE(params$run_plots)) {
+  if (is.null(params$data_dir)) stop("Set data_dir to your saved results.")
+  output <- gfm_plot_individual(
+    data_dir = params$data_dir, output_dir = params$output_dir,
+    n = params$n, models = params$models, lambda_settings = params$lambda_settings,
+    histogram_bins = params$histogram_bins, figure_types = params$figure_types,
+    overwrite = params$overwrite, previews = params$previews,
+    require_complete = params$require_complete
+  )
+  knitr::kable(as.data.frame(table(output$figures$kind)),
+               col.names = c("Figure type", "PDF count"))
+  cat("Saved figures to:", output$output_dir, "\n")
+} else {
+  cat("Functions loaded. Set data_dir and run_plots: true to export figures.\n")
+}
+```
+
+QQ plots use the saved standardized statistics without rescaling. Histograms
+use the saved **unstandardized** `lambda_raw_error_*` and
+`lambda_debiased_error_*` columns: diagonal entries are multiplied by
+$\sqrt{2}$ to recover matrix units; off-diagonal entries are unchanged.
+Adding the true entry gives the estimate. Matrix entries are in the saved
+truth-aligned coordinate frame ($\Lambda_q$). The standardized `raw_lambda_*`
+and `debiased_lambda_*` columns cannot replace these error columns.

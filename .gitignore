@@ -1,59 +1,51 @@
-# History files
+# R and editor session state
 .Rhistory
 .Rapp.history
-
-# Session Data files
 .RData
 .RDataTmp
-
-# User-specific files
 .Ruserdata
-
-# Example code in package build process
-*-Ex.R
-
-# Output files from R CMD build
-/*.tar.gz
-
-# Output files from R CMD check
-/*.Rcheck/
-
-# RStudio files
-.Rproj.user/
-
-# produced vignettes
-vignettes/*.html
-vignettes/*.pdf
-
-# OAuth2 token, see https://github.com/hadley/httr/releases/tag/v0.3
+.Renviron
 .httr-oauth
+.Rproj.user/
+.DS_Store
+__pycache__/
+*.pyc
 
-# knitr and R markdown default cache directories
-*_cache/
-/cache/
+# Keep local-only acceleration sources out of GitHub.
+**/runtime/
 
-# Temporary files created by R markdown
+# Generated simulation output and compiler products
+**/data/
+# Saved results and reports are deferred until review is complete.
+**/results/
+**/reports/
+**/*_cache/
+**/*_files/
+**/cache/
 *.utf8.md
 *.knit.md
-
-# R Environment Variables
-.Renviron
-
-# Project data and generated simulation output
-/data/
-/simulations/*.html
-/simulations/*.pdf
-/plots/*.html
-/plots/*.pdf
-/plots/*.png
-/plots/*_files/
-/simulations/*_files/
-
-# macOS metadata
-.DS_Store
-
-# translation temp files
-po/*~
-
-# RStudio Connect folder
+*-Ex.R
+*.tar.gz
+**/vignettes/*.html
+**/vignettes/*.pdf
+**/simulations/*.html
+**/simulations/*.pdf
+**/plots/*.html
+**/plots/*.pdf
+**/plots/*.png
+**/po/*~
 rsconnect/
+*.so
+*.dylib
+*.o
+*.dll
+*.log
+*.aux
+*.out
+*.toc
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+*.Rcheck/
+
+# New simulations must write to their model's data/ directory.

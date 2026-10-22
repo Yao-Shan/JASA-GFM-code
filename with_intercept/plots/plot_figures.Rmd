@@ -1,0 +1,87 @@
+---
+title: "GFM with additive node effects: figures from saved results"
+output:
+  html_document:
+    toc: true
+    code_folding: hide
+params:
+  run_plots: false
+  data_dir: null
+  results_file: null
+  output_dir: "../data/figures_saved"
+  n: null
+  nodes: "1"
+  models: null
+  kinds: ["qq"]
+  font: "latex"
+  histogram_bins: 30
+  include_alpha_marginal: true
+---
+
+Export separate vector PDFs from saved results. Set `run_plots: true` and supply
+either `results_file` (native `results.rds`) or `data_dir` (historical
+`theorem1_records.csv` and `theorem2_records.csv`). Paths are relative to this
+notebook. Each export creates a new run subfolder beneath `output_dir`.
+
+- `qq`: Theorem 1 components, marginal alpha, joint chi-square, and **debiased
+  Theorem 2 only**. No reference bands are added.
+- `hist_estimates`: overlaid $\widehat\Lambda_{ab}$ and $\widetilde\Lambda_{ab}$.
+- `hist_errors`: overlaid $\widehat\Lambda_{ab}-\Lambda^\star_{ab}$ and
+  $\widetilde\Lambda_{ab}-\Lambda^\star_{ab}$.
+
+Histograms use saved estimates in the truth-aligned frame ($\Lambda_q$), with
+$a,b$ indexing matrix entries. Diagonal entries of `Lambda_v` are multiplied by
+$\sqrt{2}$; off-diagonal entries are unchanged. Both estimators share bins and
+replications. Error histograms shift estimates by the true entry, preserving
+density heights. The dotted reference marks the truth, or zero for errors.
+
+The defaults select QQ plots across all saved sizes. For all individual figures
+at $n=1000$, set `n: 1000` and `kinds: ["qq", "hist_estimates", "hist_errors"]`.
+Use `n: null` to keep all saved sizes.
+`nodes: "all"` selects all saved nodes. The dimension is read from `K` in the
+input. For node-only runs without debiasing, choose `kinds: ["qq"]`.
+`font: "latex"` uses Latin Modern and requires `pdflatex` with `lmodern`;
+`font: "serif"` uses base-R text without TeX. `histogram_bins` sets the approximate
+number of common bins. Sample sizes appear in filenames, not plot titles.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = TRUE, message = TRUE)
+input_file <- knitr::current_input(dir = TRUE)
+paths <- c(if (length(input_file) == 1L && !is.na(input_file) && nzchar(input_file)) dirname(input_file),
+           getwd(), file.path(getwd(), "plots"), file.path(getwd(), "with_intercept", "plots"))
+found <- paths[file.exists(file.path(paths, "plot_individual.R"))]
+if (!length(found)) stop("Cannot locate plots/plot_individual.R.")
+plot_root <- normalizePath(found[1], mustWork = TRUE)
+source(file.path(plot_root, "plot_individual.R"), local = knitr::knit_global())
+resolve <- function(x) if (grepl("^(/|[A-Za-z]:[/\\\\])", path.expand(x))) path.expand(x) else file.path(plot_root, x)
+figures <- NULL
+```
+
+## Create figures
+
+```{r export}
+if (!isTRUE(params$run_plots)) {
+  cat("No figures generated. Enable run_plots and supply one saved-results input.\n")
+} else {
+  inputs <- Filter(Negate(is.null), list(params$results_file, params$data_dir))
+  if (length(inputs) != 1L) stop("Supply exactly one of results_file or data_dir.")
+  output <- file.path(resolve(params$output_dir), paste0("run_", format(Sys.time(), "%Y%m%d_%H%M%S"), "_", Sys.getpid()))
+  suffix <- 0L
+  while (file.exists(output)) {
+    suffix <- suffix + 1L
+    output <- file.path(resolve(params$output_dir), paste0("run_", format(Sys.time(), "%Y%m%d_%H%M%S"), "_", Sys.getpid(), "_", suffix))
+  }
+  figures <- gfb_plot_saved(resolve(inputs[[1]]), output,
+    nodes = params$nodes, models = params$models, sample_sizes = params$n,
+    kinds = unlist(params$kinds), font = params$font,
+    include_alpha_marginal = params$include_alpha_marginal,
+    histogram_breaks = params$histogram_bins)
+  knitr::kable(figures$figures)
+  cat("PDF directory:", figures$output_dir, "\n")
+}
+```
+
+`figure_audit.csv` records retained and excluded rows. `qq_points.csv` and
+`histogram_values.csv` contain the plotted values; `input_hashes.csv` identifies
+the source files. Failed or nonfinite rows are excluded explicitly. Values are
+neither recentered nor rescaled to improve their appearance.

@@ -42,8 +42,7 @@ check(all(vapply(as.list(api), is.function, logical(1))), "source defines functi
 fit_network <- api$gfm_fit
 predict_network <- api$gfm_predict
 
-# Parse only R code chunks, then evaluate ONLY selected function definitions.
-# No library(), RNGkind(), truth generation, or runtime expressions are run.
+# Load selected function definitions from R chunks without running the pipeline.
 lines <- readLines(file.path(root, "simulations", "node_inference.Rmd"), warn = FALSE)
 in_chunk <- FALSE
 r_code <- character()
@@ -62,8 +61,7 @@ for (expr in parse(text = r_code)) {
 }
 check(exists("run_pgd_network", reference, inherits = FALSE), "original PGD loaded safely")
 
-# Explicit eigen-direction removal: no tolerance, automatic rank cutoff, or
-# require_rank option. Known inverses test both public-source and Rmd helpers.
+# Check explicit n_drop inverses in the source and notebook helpers.
 for (implementation in c("source", "simulation")) {
   pinv <- if (implementation == "source") api$.gfm_safe_pinv_psd else reference$safe_pinv_psd
   check(identical(names(formals(pinv)), c("A", "n_drop")) &&
@@ -111,8 +109,7 @@ equal(fit$lambda_v_debiased, fit$lambda_v_hat + fit$correction$correction_total,
 equal(api$.gfm_get_lambda_v(fit$Lambda_debiased), fit$lambda_v_debiased,
       "corrected matrix/vector correspondence")
 
-# Initialization, finite-step optimization, and correction match original math
-# for every likelihood. Probit thereby tests observed, outcome-dependent weights.
+# Compare initialization, updates and correction across all four likelihoods.
 observations <- list(gaussian = A, logit = 1 * (A > 0),
                      probit = 1 * (A > 0), poisson = round(abs(A)))
 for (model in names(observations)) {
@@ -223,7 +220,7 @@ equal(fit_diagonal$Lambda_hat, fit$Lambda_hat, "diagonal ignored before initiali
 check(fit_diagonal$debiasing$status == "not_requested", "debias=FALSE status")
 error(api$.gfm_project_C_U_certified(diag(5)[, 1:2], sqrt(2)), "joint C_U projection unavailable")
 
-# CSV imports preserve values and node order; no fixture is written to project.
+# Check CSV values and node order using temporary fixtures.
 plain_csv <- tempfile(fileext = ".csv"); named_csv <- tempfile(fileext = ".csv")
 write.table(A, plain_csv, sep = ",", row.names = FALSE, col.names = FALSE)
 write.csv(A, named_csv)

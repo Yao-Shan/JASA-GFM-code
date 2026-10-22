@@ -1,0 +1,224 @@
+---
+title: "Baseline GFM: node effects and nodewise inference"
+output:
+  html_document:
+    toc: true
+    code_folding: hide
+params:
+  alpha_normalization: "l2"
+  debias_method: "pdf_bp_bm"
+  worker_backend: "in_process"
+  run_simulation: false
+  model: "all"
+  n: 60
+  n_sim: 3
+  k: null
+  lambda_values: "0.5,0.5"
+  target_node: 1
+  design_seed: 238687
+  alpha_seed: 817285
+  replication_seed_base: 2000
+  alpha_min: -2
+  alpha_max: 0
+  sigma: 1
+  learning_rate: null
+  max_iter: null
+  tolerance: 0.05
+  M_bound_U: null
+  M_bound_alpha: null
+  M_bound_Lambda: null
+  probability_eps: null
+  max_debias_memory_mb: null
+  backtracking: false
+  debias: true
+  save_fits: false
+  n_cores: 1
+  inference_workers: 1
+  output_dir: null
+  run_id: null
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = TRUE, warning = TRUE)
+input_file <- knitr::current_input(dir = TRUE)
+active_file <- if (requireNamespace("rstudioapi", quietly = TRUE) && rstudioapi::isAvailable())
+  tryCatch(rstudioapi::getSourceEditorContext()$path, error = function(e) "") else ""
+input_dirs <- c(if (length(input_file) == 1L && !is.na(input_file) && nzchar(input_file)) dirname(input_file),
+                if (nzchar(active_file)) dirname(active_file), getwd())
+candidates <- unique(unlist(lapply(input_dirs, function(p)
+  c(p, file.path(p, ".."), file.path(p, "with_intercept")))))
+valid <- vapply(candidates, function(p) file.exists(file.path(p, "R", "gfm_baseline.R")), logical(1))
+if (!any(valid)) stop("Cannot locate with_intercept/R/gfm_baseline.R; keep the package directories together.")
+project_root <- normalizePath(candidates[which(valid)[1L]], mustWork = TRUE)
+baseline_root <- file.path(project_root, "R")
+source(file.path(baseline_root, "gfm_baseline.R"), local = knitr::knit_global())
+if (!isTRUE(getOption("knitr.in.progress")) || !exists("params", inherits = FALSE)) {
+  parsed <- knitr::knit_params(readLines(file.path(project_root, "simulations", "node_inference.Rmd"), warn = FALSE))
+  params <- lapply(parsed, function(x) x$value)
+}
+lambda_values <- if (is.character(params$lambda_values)) {
+  as.numeric(trimws(strsplit(params$lambda_values, ",", fixed = TRUE)[[1L]]))
+} else as.numeric(params$lambda_values)
+K <- if (is.null(params$k)) length(lambda_values) else params$k
+models <- if (identical(params$model, "all")) c("gaussian", "logit", "poisson", "probit") else params$model
+control <- Filter(Negate(is.null), list(
+  learning_rate = params$learning_rate, max_iter = params$max_iter,
+  tolerance = params$tolerance, M_bound_U = params$M_bound_U,
+  M_bound_alpha = params$M_bound_alpha, M_bound_Lambda = params$M_bound_Lambda,
+  probability_eps = params$probability_eps,
+  max_debias_memory_mb = params$max_debias_memory_mb, backtracking = params$backtracking
+))
+# NULL selects at most seven workers; 1 selects one.
+n_cores <- if (is.null(params$n_cores)) {
+  min(7L, max(1L, parallel::detectCores(logical = FALSE) - 1L, na.rm = TRUE))
+} else as.integer(params$n_cores)
+output_dir <- if (is.null(params$output_dir)) file.path(project_root, "data", "baseline",
+  paste0("alpha_", params$alpha_normalization)) else params$output_dir
+```
+
+This notebook uses the centered baseline model
+
+\[
+\Theta_{ij}^{\star}=\alpha_i^{\star}+\alpha_j^{\star}
+  +(u_i^{\star})^\top\Lambda^{\star}u_j^{\star},\qquad
+a_i\overset{\mathrm{iid}}{\sim}\mathrm{Uniform}(-2,0),\qquad
+\alpha_i^{\star}=a_i/\|a\|_2.
+\]
+
+There is one effect per node. The fitted parameter is
+$y_i=(u_i^\top,\alpha_i)^\top$, with $K+1$ components.
+The uniform support describes the raw draws. Estimation retains the
+bounded parameter space and does not constrain the fitted alpha norm.
+
+## Execution controls
+
+The default `run_simulation: false` checks the fixed truth without fitting
+networks or writing simulation results. Enable it explicitly for the small
+trial configured above. `n_sim` counts networks; `max_iter` limits optimizer
+updates for each network. The networks (one per model and replicate) are
+fitted in parallel on `n_cores` worker processes; `null` uses at most seven
+physical cores and `1` uses one worker. Each network is seeded on its own,
+so each task uses its assigned base+r seed independently of scheduling;
+floating-point differences can depend on the numerical backend.
+YAML controls set to `null` retain the core defaults; non-null values are
+passed to `gfb_config()` and recorded with the saved run.
+
+The same $U^\star$, $\alpha^\star$ and $\Lambda^\star$ are held fixed across
+all repetitions and observation models. Replicate $r$ uses
+`replication_seed_base + r`, seeded separately for each model. The default
+three repetitions test execution only; they cannot establish coverage or
+asymptotic normality.
+
+Save YAML edits before running setup or Run All. Interactive execution
+reloads saved values each time; Knit with Parameters retains supplied overrides.
+`worker_backend: "in_process"` and `n_cores: 1` are the portable trial defaults.
+For parallel runs explicitly select `worker_backend: "psock"` and a worker count.
+This notebook uses the ordinary R implementation for fitting and inference.
+
+The default `alpha_normalization: "l2"` first samples raw
+$a_i\overset{\mathrm{iid}}{\sim}\mathrm{Uniform}(-2,0)$, then uses
+$\alpha_i^\star=a_i/\sqrt{\sum_j a_j^2}$, so $\|\alpha^\star\|_2=1$.
+The transformed components share a random denominator: they are dependent,
+are no longer Uniform(-2,0), and their typical scale decreases as $n^{-1/2}$.
+This changes the data-generating design, not the estimation constraints,
+full-matrix initialization, optimizer controls or BP+BM correction.
+Set `alpha_normalization: "none"` to reproduce the original unscaled draws.
+Saved truth retains `alpha_raw` and normalization metadata. The default output
+and figure paths separate `alpha_l2` from `alpha_none`; an explicitly supplied
+`output_dir` or `figure_dir` remains in effect. Do not combine different
+generation modes or existing screening results in one evaluation.
+
+## Fixed truth and constraints
+
+```{r truth}
+truth <- gfb_generate_truth(
+  n = params$n, K = K, lambda_values = lambda_values,
+  design_seed = params$design_seed, alpha_seed = params$alpha_seed,
+  alpha_min = params$alpha_min, alpha_max = params$alpha_max, alpha_normalization = params$alpha_normalization
+)
+truth$diagnostics
+data.frame(alpha_normalization = params$alpha_normalization,
+           alpha_raw_l2_norm = sqrt(sum(truth$alpha_raw^2)),
+           alpha_model_l2_norm = sqrt(sum(truth$alpha_star^2)))
+data.frame(alpha_min_observed = min(truth$alpha_star),
+           alpha_max_observed = max(truth$alpha_star),
+           max_center_error = max(abs(colSums(truth$U_star))),
+           max_orthogonality_error = max(abs(crossprod(truth$U_star) / params$n - diag(K))))
+configs <- lapply(models, function(model) {
+  gfb_config(n = params$n, K = K, model = model, sigma = params$sigma, control = control)
+})
+names(configs) <- models
+lapply(configs, function(config) config)
+```
+
+The design first samples points in the unit ball, centers their columns, then
+whitens them so that $\mathbf1^\top U^\star=0$ and
+$(U^\star)^\top U^\star=nI_K$. Node effects use their own seed.
+
+## Small experiment
+
+```{r simulate}
+simulation <- NULL
+if (isTRUE(params$run_simulation)) {
+  simulation <- gfb_run_simulation(
+    n = params$n, K = K, models = models, n_sim = params$n_sim,
+    nodes = params$target_node, lambda_values = lambda_values,
+    sigma = params$sigma, design_seed = params$design_seed,
+    alpha_seed = params$alpha_seed, replication_seed_base = params$replication_seed_base,
+    alpha_min = params$alpha_min, alpha_max = params$alpha_max, alpha_normalization = params$alpha_normalization,
+    control = control, debias = params$debias, debias_method = params$debias_method, output_dir = output_dir,
+    run_id = params$run_id, save_fits = params$save_fits,
+    n_cores = n_cores,
+    worker_backend = params$worker_backend,
+    inference_workers = params$inference_workers
+  )
+  simulation$fit_summary
+  cat("Saved run:", simulation$run_dir, "\n")
+} else {
+  cat("Truth checked. No networks were fitted and no simulation files were written.\n")
+}
+```
+
+```{r results}
+if (!is.null(simulation)) {
+  print(table(simulation$fit_summary$model, simulation$fit_summary$status))
+  print(simulation$node_summary)
+  print(simulation$lambda_summary)
+}
+```
+
+Failed and unconverged repetitions remain in `fit_summary` and the nested
+`records`; inference is skipped when optimization has not converged. The
+fit diagnostics also flag binary nodes whose observed edges are all zero or
+all one, and Poisson nodes whose edges are all zero, in `one_sided_nodes`.
+Such fits are ineligible for inference even when their numerical residual is small.
+The node table distinguishes joint standardized coordinates (`z_u1`, ...,
+`z_alpha_joint`) from the scalar marginal statistic `alpha_marginal_z`.
+Joint whitening generally mixes latent coordinates and the node effect.
+The joint quadratic statistic has $K+1$ degrees of freedom.
+
+Each saved run has a fresh directory below `data/baseline/alpha_l2/` by default. Supplying an
+already existing `run_id` raises an error, preserving earlier results.
+To draw figures from one completed run, pass its `results.rds` path to
+`../plots/plot_figures.Rmd`; plotting does not refit networks.
+
+The default `debias_method: "pdf_bp_bm"` retains the baseline
+PDF's $B_{P,y_i}=-\frac12\sum_{j\ne i}I_{d,jj}^{-1}(u_i^T,0)^T$
+and $DD^T B_P/n^2$ structure, and includes the no-intercept theory's $B_M$
+once. Under $\ell=\log p$, code uses $B_1=-\frac12 E[\ell''']$ contractions
+and $B_M=E[\ell'\ell'']$ contractions. The additive likelihood correction is
+$T(B_1)-T(B_M)$; with the retained negative $B_P$, its additive correction is
+$+I_{\Lambda\Lambda}^{-1}I_{\Lambda Y}DD^TB_P/n^2$.
+These are explicit sign normalizations of the displayed PDF formulas.
+
+The reviewed finite-sample projector $P=I-D(D^TD)^{-1}D^T$ is retained;
+it differs from the literal plug-in $I-DD^T/n$ away from $D^TD=nI$.
+Set
+`debias_method: "constrained_second_order"` to compare the preserved previous
+method; it is not added to the BP/BM correction. Saved results identify the
+method and expose `correction_ell3`, `correction_BM` (also named
+`correction_score_ell2`), and `correction_constraint` separately.
+
+See `../docs/implementation_notes.md` for the formula mapping and validation scope.
+The page-15 argument remains a theoretical question; these implementation
+checks do not prove the increasing-dimension limit or normal/chi-square fit.

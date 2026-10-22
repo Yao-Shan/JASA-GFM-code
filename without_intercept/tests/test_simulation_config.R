@@ -1,5 +1,4 @@
-# Configuration regression checks; run with Rscript --vanilla from any directory.
-# Only selected function definitions are evaluated: never source the notebook.
+# Check configuration helpers without running the simulation notebook.
 args <- commandArgs(trailingOnly = FALSE)
 script <- sub("^--file=", "", args[grepl("^--file=", args)])
 if (length(script)) script <- gsub("~+~", " ", script, fixed = TRUE)
@@ -54,8 +53,7 @@ check(setequal(ls(api), needed), "all configuration helpers loaded without runti
 check(all(vapply(as.list(api), is.function, logical(1L))),
       "extraction evaluates function definitions only")
 
-# Inspect the fallback's literal list without executing its assignment or any
-# other top-level expression (library calls, RNG changes, or the run pipeline).
+# Inspect fallback values without evaluating top-level code.
 fallback <- Filter(function(expr) assignment_to(expr, "default_runtime_params"),
                    as.list(expressions))
 check(length(fallback) == 1L, "one runtime fallback definition")
@@ -75,8 +73,7 @@ if (!requireNamespace("knitr", quietly = TRUE)) {
 header_end <- which(lines == "---")
 check(length(header_end) >= 2L && header_end[[1L]] == 1L,
       "notebook begins with a YAML header")
-# Match knitting's handling of the key 'n' (plain YAML 1.1 treats it as FALSE),
-# while explicitly disabling evaluation of any R expressions in parameters.
+# Parse YAML like knitr, preserving the key n and disabling R evaluation.
 yaml_params <- lapply(knitr::knit_params(lines, evaluate = FALSE), `[[`, "value")
 check(is.list(yaml_params), "YAML supplies simulation parameters")
 check(identical(yaml_params$model, "all") && isTRUE(yaml_params$run_simulation),

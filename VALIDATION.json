@@ -1,0 +1,29 @@
+{
+  "status": "passed",
+  "scope": "package layout, portability, documentation links and file integrity",
+  "model_categories": {
+    "with_intercept": [
+      "R",
+      "docs",
+      "plots",
+      "simulations",
+      "tests"
+    ],
+    "without_intercept": [
+      "R",
+      "docs",
+      "plots",
+      "simulations",
+      "tests"
+    ]
+  },
+  "file_count": 38,
+  "total_bytes": 446767,
+  "errors": [],
+  "warnings": [],
+  "exclusions_from_manifest": [
+    "PACKAGE_MANIFEST.csv",
+    "VALIDATION.json"
+  ],
+  "note": "Model tests are recorded separately; no Monte Carlo study is launched by this check."
+}
